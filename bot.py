@@ -305,6 +305,8 @@ async def process_message(message: Message):
             )
 
 async def main():
+    # Удаляем webhook перед запуском
+    await bot.delete_webhook(drop_pending_updates=True)
     # Запускаем бота
     await dp.start_polling(bot)
 
