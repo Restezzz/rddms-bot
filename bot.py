@@ -5,6 +5,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
+import re
 
 from config import BOT_TOKEN
 from session_manager import SessionManager, UserState, GenerationMode, PostSize
@@ -47,6 +48,153 @@ size_keyboard = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Средний пост (400-800 символов)", callback_data="size:medium")],
     [InlineKeyboardButton(text="Длинный пост (800-1200 символов)", callback_data="size:large")]
 ])
+
+# Список специальных символов, которые нужно экранировать в MarkdownV2
+SPECIAL_CHARS = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+
+def escape_markdown(text):
+    """Экранирует специальные символы для MarkdownV2, но сохраняет форматирование md-разметки"""
+    # Сначала защищаем существующую разметку
+    # Защищаем **жирный**
+    bold_pattern = r'(\*\*)(.*?)(\*\*)'
+    protected_text = re.sub(bold_pattern, lambda m: f"BOLD_START{m.group(2)}BOLD_END", text)
+    
+    # Защищаем `код`
+    code_pattern = r'(`)(.*?)(`)'
+    protected_text = re.sub(code_pattern, lambda m: f"CODE_START{m.group(2)}CODE_END", protected_text)
+    
+    # Защищаем ```блок кода```
+    code_block_pattern = r'(```)(.*?)(```)'
+    protected_text = re.sub(code_block_pattern, lambda m: f"CODE_BLOCK_START{m.group(2)}CODE_BLOCK_END", protected_text)
+    
+    # Защищаем ~~зачеркнутый~~
+    strike_pattern = r'(~~)(.*?)(~~)'
+    protected_text = re.sub(strike_pattern, lambda m: f"STRIKE_START{m.group(2)}STRIKE_END", protected_text)
+    
+    # Защищаем ||скрытый текст||
+    spoiler_pattern = r'(\|\|)(.*?)(\|\|)'
+    protected_text = re.sub(spoiler_pattern, lambda m: f"SPOILER_START{m.group(2)}SPOILER_END", protected_text)
+    
+    # Защищаем [ссылка](URL)
+    link_pattern = r'(\[)(.*?)(\])(\()(.*?)(\))'
+    protected_text = re.sub(link_pattern, lambda m: f"LINK_TEXT_START{m.group(2)}LINK_TEXT_END{m.group(4)}LINK_URL{m.group(6)}", protected_text)
+    
+    # Экранируем все специальные символы
+    for char in SPECIAL_CHARS:
+        protected_text = protected_text.replace(char, f'\\{char}')
+    
+    # Восстанавливаем защищенную разметку
+    result = protected_text.replace("BOLD_START", "**").replace("BOLD_END", "**")
+    result = result.replace("CODE_START", "`").replace("CODE_END", "`")
+    result = result.replace("CODE_BLOCK_START", "```").replace("CODE_BLOCK_END", "```")
+    result = result.replace("STRIKE_START", "~~").replace("STRIKE_END", "~~")
+    result = result.replace("SPOILER_START", "||").replace("SPOILER_END", "||")
+    result = result.replace("LINK_TEXT_START", "[").replace("LINK_TEXT_END", "]")
+    result = result.replace("LINK_URL", "(").replace("(LINK_URL", "(")
+    
+    return result
+
+def format_message_text(text):
+    """Подготавливает текст с учетом ограничений Markdown в Telegram"""
+    # Преобразование блоков кода и скрытого текста в HTML, так как они не поддерживаются в MarkdownV2
+    
+    # Преобразование ```блок кода``` в <pre>блок кода</pre>
+    code_block_pattern = r'```(.*?)```'
+    html_with_code_blocks = re.sub(code_block_pattern, r'<pre>\1</pre>', text, flags=re.DOTALL)
+    
+    # Преобразование ||скрытый текст|| в <tg-spoiler>скрытый текст</tg-spoiler>
+    spoiler_pattern = r'\|\|(.*?)\|\|'
+    html_text = re.sub(spoiler_pattern, r'<tg-spoiler>\1</tg-spoiler>', html_with_code_blocks)
+    
+    # Остальная Markdown-разметка поддерживается в MarkdownV2
+    # Экранируем специальные символы для MarkdownV2
+    markdown_types = ['**', '`', '~~', '[', ']', '(', ')']
+    
+    for md_type in markdown_types:
+        html_text = html_text.replace(md_type, f'\\{md_type}')
+    
+    # Экранируем другие специальные символы
+    for char in ['.', '!', '+', '-', '=', '>', '#', '|', '{', '}']:
+        html_text = html_text.replace(char, f'\\{char}')
+    
+    # Восстанавливаем Markdown-разметку
+    html_text = html_text.replace('\\*\\*', '**')
+    html_text = html_text.replace('\\`', '`')
+    html_text = html_text.replace('\\~\\~', '~~')
+    
+    # Восстанавливаем ссылки
+    link_pattern = r'\\\[\s*(.*?)\s*\\\]\\\(\s*(.*?)\s*\\\)'
+    html_text = re.sub(link_pattern, r'[\1](\2)', html_text)
+    
+    return html_text
+
+def format_to_html(text):
+    """Конвертирует Markdown-разметку в HTML для использования в Telegram"""
+    # Сначала экранируем специальные HTML-символы
+    html_text = text.replace('&', '&amp;')
+    html_text = html_text.replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Сохраняем плейсхолдеры для разметки, чтобы избежать проблем с вложенными тегами
+    placeholders = {}
+    
+    # Функция для создания уникальных плейсхолдеров
+    def placeholder(match, prefix):
+        nonlocal placeholders
+        content = match.group(1)
+        placeholder_id = f"__{prefix}_{len(placeholders)}__"
+        placeholders[placeholder_id] = content
+        return placeholder_id
+    
+    # Заменяем Markdown на плейсхолдеры
+    # **жирный** -> __bold_0__
+    bold_pattern = r'\*\*(.*?)\*\*'
+    html_text = re.sub(bold_pattern, lambda m: placeholder(m, "bold"), html_text)
+    
+    # `код` -> __code_0__
+    code_pattern = r'`(.*?)`'
+    html_text = re.sub(code_pattern, lambda m: placeholder(m, "code"), html_text)
+    
+    # ```блок кода``` -> __codeblock_0__
+    code_block_pattern = r'```(.*?)```'
+    html_text = re.sub(code_block_pattern, lambda m: placeholder(m, "codeblock"), html_text, flags=re.DOTALL)
+    
+    # ~~зачеркнутый~~ -> __strike_0__
+    strike_pattern = r'~~(.*?)~~'
+    html_text = re.sub(strike_pattern, lambda m: placeholder(m, "strike"), html_text)
+    
+    # ||скрытый текст|| -> __spoiler_0__
+    spoiler_pattern = r'\|\|(.*?)\|\|'
+    html_text = re.sub(spoiler_pattern, lambda m: placeholder(m, "spoiler"), html_text)
+    
+    # [ссылка](URL) -> __link_0__
+    link_pattern = r'\[(.*?)\]\((.*?)\)'
+    
+    def link_placeholder(match):
+        text = match.group(1)
+        url = match.group(2)
+        placeholder_id = f"__link_{len(placeholders)}__"
+        placeholders[placeholder_id] = (text, url)
+        return placeholder_id
+    
+    html_text = re.sub(link_pattern, link_placeholder, html_text)
+    
+    # Заменяем плейсхолдеры на HTML-теги
+    for placeholder_id, content in placeholders.items():
+        if placeholder_id.startswith("__bold_"):
+            html_text = html_text.replace(placeholder_id, f"<b>{content}</b>")
+        elif placeholder_id.startswith("__code_"):
+            html_text = html_text.replace(placeholder_id, f"<code>{content}</code>")
+        elif placeholder_id.startswith("__codeblock_"):
+            html_text = html_text.replace(placeholder_id, f"<pre>{content}</pre>")
+        elif placeholder_id.startswith("__strike_"):
+            html_text = html_text.replace(placeholder_id, f"<s>{content}</s>")
+        elif placeholder_id.startswith("__spoiler_"):
+            html_text = html_text.replace(placeholder_id, f"<tg-spoiler>{content}</tg-spoiler>")
+        elif placeholder_id.startswith("__link_"):
+            text, url = content
+            html_text = html_text.replace(placeholder_id, f'<a href="{url}">{text}</a>')
+    
+    return html_text
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -159,7 +307,13 @@ async def process_size_selection(callback_query: CallbackQuery):
         
         # Отправляем результат
         await status_message.edit_text("✅ Генерация завершена!")
-        await callback_query.message.answer(generated_post)
+        try:
+            html_text = format_to_html(generated_post)
+            await callback_query.message.answer(html_text, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
+            # Если возникла ошибка, отправляем без форматирования
+            await callback_query.message.answer(generated_post)
         
         # Создаем инлайн-кнопки для действий с постом
         actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -217,7 +371,12 @@ async def cmd_change(message: Message, user_id: int):
     session_manager.update_session(user_id, chat_id=message.chat.id)
     
     # Показываем текущий пост и запрашиваем изменения
-    post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
+    try:
+        html_text = format_to_html(session.current_post)
+        post_message = await message.answer(f"Текущий пост:\n\n{html_text}", parse_mode="HTML")
+    except TelegramBadRequest as e:
+        logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
+        post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
     
     # Сохраняем ID сообщения с текущим постом
     session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
@@ -285,7 +444,12 @@ async def process_message(message: Message):
             
             # Сообщаем об успешном изменении и показываем результат
             await status_message.edit_text("✅ Пост успешно изменен!")
-            await message.answer(modified_post)
+            try:
+                html_text = format_to_html(modified_post)
+                await message.answer(html_text, parse_mode="HTML")
+            except TelegramBadRequest as e:
+                logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
+                await message.answer(modified_post)
             
             # Создаем инлайн-кнопки для дальнейших действий
             actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -304,9 +468,32 @@ async def process_message(message: Message):
                 "Пожалуйста, попробуйте еще раз с более кратким описанием изменений."
             )
 
+async def test_api_connection():
+    """Проверяет подключение к API при запуске"""
+    try:
+        logger.info("Диагностика API подключения...")
+        
+        # Простой запрос для проверки соединения
+        sample_text = await llm_client.generate_without_template(
+            topic="тестовый запрос",
+            post_size=PostSize.SMALL
+        )
+        
+        logger.info(f"Тестовый запрос к API выполнен успешно!")
+        return True
+    except Exception as e:
+        logger.error(f"Тестовый запрос к API не удался: {e}")
+        return False
+
 async def main():
     # Удаляем webhook перед запуском
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Проверяем соединение с API
+    api_status = await test_api_connection()
+    if not api_status:
+        logger.warning("API недоступен, бот будет работать с заглушками")
+    
     # Запускаем бота
     await dp.start_polling(bot)
 
