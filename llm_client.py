@@ -2,10 +2,21 @@ import requests
 import asyncio
 import json
 import aiohttp
-from config import OPENROUTER_API_URLS, OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_HEADERS
+from config import (
+    OPENROUTER_API_URLS, OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_HEADERS,
+    BACKUP_MODELS, REQUEST_TIMEOUT, MAX_RETRIES, ALLOWED_REFERERS, HTTP_PROXY, HTTPS_PROXY
+)
 import logging
 from rddm_info import get_rddm_knowledge
 from session_manager import PostSize
+import os
+from urllib3.exceptions import InsecureRequestWarning
+import urllib3
+import time
+import random
+
+# Отключаем предупреждения SSL для отладки
+urllib3.disable_warnings(InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,10 +26,22 @@ class LLMClient:
         self.api_urls = api_urls
         self.api_key = api_key
         self.model = model
+        self.backup_models = BACKUP_MODELS
         self.headers = headers.copy()
         self.headers.update({
             "Content-Type": "application/json",
         })
+        
+        # Настройки прокси из конфига или переменных окружения
+        self.http_proxy = HTTP_PROXY or os.environ.get('HTTP_PROXY')
+        self.https_proxy = HTTPS_PROXY or os.environ.get('HTTPS_PROXY')
+        
+        # Таймауты и количество попыток
+        self.request_timeout = REQUEST_TIMEOUT
+        self.max_retries = MAX_RETRIES
+        
+        # Список разрешенных реферреров
+        self.referers = ALLOWED_REFERERS
     
     async def generate_from_template(self, template_post, topic, post_size=PostSize.LARGE, language="ru"):
         """Генерирует пост на основе шаблона и темы."""
@@ -250,66 +273,174 @@ class LLMClient:
         return text
     
     async def _send_request_async(self, system_prompt, user_prompt):
-        """Асинхронно отправляет запрос к OpenRouter API."""
-        # Альтернативные URL для API
-        api_urls = self.api_urls
+        """Асинхронно отправляет запрос к OpenRouter API с улучшенной обработкой ошибок и прокси."""
+        # Все возможные URL для API
+        api_urls = self.api_urls.copy() if self.api_urls else []
         
-        for attempt, current_url in enumerate(api_urls, 1):
-            try:
-                # Подготовка данных для запроса в формате OpenAI API
-                payload = {
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "max_tokens": 1024,
-                    "temperature": 0.7
-                }
-                
-                # Обновленный набор заголовков
-                headers = self.headers.copy()
-                
-                logger.info(f"Попытка {attempt}/{len(api_urls)}: Отправка запроса к {current_url} для модели {self.model}")
-                
-                # Используем aiohttp для асинхронных запросов
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        current_url, 
-                        json=payload, 
+        # Добавим прямые API URL и альтернативные домены
+        all_urls = api_urls + [
+            "https://openrouter.ai/api/v1/chat/completions",
+            "https://api.openrouter.ai/api/v1/chat/completions",
+            "https://openrouter.ai/v1/chat/completions",
+            "https://openrouterme.org/api/v1/chat/completions",
+            "https://openrouterme.org/v1/chat/completions"
+        ]
+        
+        # Удаляем дубликаты, сохраняя порядок
+        all_urls = list(dict.fromkeys(all_urls))
+        
+        # Прокси настройки из переменных окружения или None
+        proxy_settings = None
+        if self.http_proxy or self.https_proxy:
+            proxy_settings = {
+                "http": self.http_proxy,
+                "https": self.https_proxy or self.http_proxy  # Если https нет, используем http
+            }
+            logger.info(f"Используем прокси: {proxy_settings}")
+        
+        # Создаем список моделей для последовательного перебора, начиная с основной
+        models_to_try = [self.model] + [m for m in self.backup_models if m != self.model]
+        logger.info(f"Модели для проверки: {models_to_try}")
+        
+        # Полный набор заголовков с вариациями рефереров
+        headers_variations = []
+        for referer in self.referers:
+            headers_variations.append({
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "HTTP-Referer": referer,
+                "X-Title": "RDDM Bot"
+            })
+        
+        # Перебираем все модели
+        for current_model in models_to_try:
+            logger.info(f"Пробуем модель: {current_model}")
+            
+            # Подготовка данных для запроса
+            payload = {
+                "model": current_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "max_tokens": 1024,
+                "temperature": 0.7
+            }
+            
+            # Перемешиваем URL и заголовки для равномерного распределения нагрузки
+            random.shuffle(all_urls)
+            random.shuffle(headers_variations)
+            
+            # Проверка всех комбинаций
+            for attempt_num, (url, headers) in enumerate([(u, h) for u in all_urls for h in headers_variations], 1):
+                # Ограничиваем количество попыток для каждой модели
+                if attempt_num > self.max_retries * len(all_urls):
+                    logger.warning(f"Превышено максимальное число попыток для модели {current_model}")
+                    break
+                    
+                try:
+                    logger.info(f"Попытка {attempt_num} с моделью {current_model}: URL={url}, Referer={headers.get('HTTP-Referer', 'None')}")
+                    
+                    # Таймаут больше для первых попыток, меньше для последующих
+                    timeout_seconds = self.request_timeout if attempt_num <= 3 else self.request_timeout // 2
+                    
+                    # Измеряем время выполнения запроса
+                    start_time = time.time()
+                    
+                    # Пробуем с SSL и без
+                    for ssl_verify in [False, True]:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.post(
+                                    url, 
+                                    json=payload, 
+                                    headers=headers,
+                                    proxy=self.https_proxy,  # Используем прокси напрямую в aiohttp
+                                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                                    ssl=ssl_verify
+                                ) as response:
+                                    elapsed_time = time.time() - start_time
+                                    logger.info(f"Ответ: статус={response.status}, время={elapsed_time:.2f}с, SSL={ssl_verify}")
+                                    
+                                    if response.status == 200:
+                                        try:
+                                            result = await response.json()
+                                            if "choices" in result and len(result["choices"]) > 0:
+                                                message = result["choices"][0]["message"]
+                                                if message and "content" in message:
+                                                    logger.info(f"Успешный ответ от {url} с моделью {current_model}")
+                                                    return message["content"]
+                                        except json.JSONDecodeError:
+                                            # Попробуем прочитать ответ как текст
+                                            text = await response.text()
+                                            logger.error(f"Ошибка парсинга JSON: {text[:200]}...")
+                                            continue
+                                    
+                                    # Логируем текст ответа при ошибке
+                                    if response.status != 200:
+                                        text = await response.text()
+                                        logger.warning(f"Неудачный статус {response.status}: {text[:200]}...")
+                                    
+                                    # Если 401, проблема с API ключом - пропускаем все дальнейшие попытки
+                                    if response.status == 401:
+                                        logger.error("Неверный API ключ. Пропускаем все дальнейшие попытки с этим ключом.")
+                                        return self._get_fallback_response(user_prompt)
+                                    
+                            # Если дошли сюда без ошибок, но успешного ответа не получили - идем дальше
+                            break
+                            
+                        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                            logger.warning(f"Ошибка {type(e).__name__} при SSL={ssl_verify}: {str(e)}")
+                            # Продолжаем со следующим ssl_verify или переходим к следующей комбинации
+                    
+                    # Небольшая задержка между попытками
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(f"Неожиданная ошибка: {type(e).__name__}: {str(e)}")
+                    # Продолжаем следующую попытку
+                    await asyncio.sleep(1)
+        
+        # Если все попытки через aiohttp не удались, пробуем через обычный requests
+        logger.info("Все попытки через aiohttp не удались. Пробуем синхронный requests...")
+        
+        # Берем последнюю использованную модель и пробуем ее еще раз через requests
+        last_model = models_to_try[-1]
+        payload["model"] = last_model
+        
+        # Список URL для синхронного запроса
+        sync_urls = random.sample(all_urls, min(3, len(all_urls)))
+        
+        for url in sync_urls:
+            for headers in headers_variations[:2]:  # Только первые две вариации заголовков
+                logger.info(f"Синхронный запрос к {url} с моделью {last_model}")
+                try:
+                    response = requests.post(
+                        url,
+                        json=payload,
                         headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=60)  # Увеличенный таймаут
-                    ) as response:
-                        if response.status != 200:
-                            error_text = await response.text()
-                            logger.error(f"Ошибка API (попытка {attempt}): {response.status}, {error_text}")
-                            # Продолжаем к следующему URL, если ошибка авторизации
-                            if response.status == 401 and attempt < len(api_urls):
-                                logger.info(f"Пробуем альтернативный URL...")
-                                continue
-                            # Если все URL не сработали или другая ошибка
-                            return self._get_fallback_response(user_prompt)
-                        
-                        result = await response.json()
-                        
-                        # Извлекаем ответ из структуры OpenAI API
-                        if "choices" in result and len(result["choices"]) > 0:
-                            message = result["choices"][0]["message"]
-                            if message and "content" in message:
-                                return message["content"]
-                
-                # Если дошли сюда, то запрос прошел без ошибок, но формат ответа неожиданный
-                logger.error(f"Неожиданный формат ответа (попытка {attempt})")
-                
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.error(f"Ошибка при обращении к API (попытка {attempt}): {e}")
-                # Продолжаем к следующему URL, если не последняя попытка
-                if attempt < len(api_urls):
-                    logger.info(f"Пробуем альтернативный URL...")
-                    continue
+                        proxies=proxy_settings,
+                        timeout=self.request_timeout // 2,  # Уменьшаем таймаут для синхронных запросов
+                        verify=False  # Отключаем проверку SSL
+                    )
+                    
+                    logger.info(f"Синхронный ответ: статус {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        try:
+                            result = response.json()
+                            if "choices" in result and len(result["choices"]) > 0:
+                                message = result["choices"][0]["message"]
+                                if message and "content" in message:
+                                    logger.info(f"Успешный синхронный ответ с моделью {last_model}")
+                                    return message["content"]
+                        except Exception as e:
+                            logger.error(f"Ошибка при обработке синхронного ответа: {e}")
+                except Exception as e:
+                    logger.error(f"Ошибка при синхронном запросе к {url}: {e}")
         
-        # Если все попытки не удались
-        logger.error(f"Все попытки запроса к API неудачны. Используем заглушку.")
+        # Если все попытки неудачны
+        logger.error("Все попытки отправки запроса к API неудачны. Возвращаем заглушку.")
         return self._get_fallback_response(user_prompt)
     
     def _get_fallback_response(self, user_prompt):
