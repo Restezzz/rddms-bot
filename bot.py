@@ -567,13 +567,40 @@ if __name__ == "__main__":
     import asyncio
     
     async def run_all():
-        # Удаляем webhook
-        logger.info("Удаляю webhook...")
+        # Проверяем и удаляем webhook с помощью прямых запросов к API
+        logger.info("Проверяем статус webhook...")
         try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Webhook удален")
+            # Получаем информацию о текущем webhook
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url:
+                logger.warning(f"Обнаружен активный webhook: {webhook_info.url}")
+                
+                # Удаляем webhook через API бота
+                logger.info("Удаляю webhook через API...")
+                await bot.delete_webhook(drop_pending_updates=True)
+                
+                # Повторно проверяем статус webhook
+                webhook_info = await bot.get_webhook_info()
+                if webhook_info.url:
+                    logger.error(f"Webhook всё ещё активен после попытки удаления: {webhook_info.url}")
+                    logger.warning("Пробую альтернативный метод удаления webhook...")
+                    
+                    # Используем альтернативный метод - прямой HTTP запрос
+                    import aiohttp
+                    delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(delete_url) as response:
+                            response_json = await response.json()
+                            if response.status == 200 and response_json.get('ok'):
+                                logger.info("Webhook успешно удален через прямой HTTP запрос!")
+                            else:
+                                logger.error(f"Не удалось удалить webhook: {response_json}")
+                else:
+                    logger.info("Webhook успешно удален!")
+            else:
+                logger.info("Webhook не активен, продолжаем работу в режиме polling.")
         except Exception as e:
-            logger.error(f"Ошибка удаления webhook: {e}")
+            logger.error(f"Ошибка при проверке/удалении webhook: {e}")
         
         # Проверяем API
         try:
@@ -660,6 +687,22 @@ if __name__ == "__main__":
             # Запускаем с автоматическим перезапуском при ошибках сети
             while True:
                 try:
+                    # Проверяем еще раз, что webhook точно удален
+                    webhook_info = await bot.get_webhook_info()
+                    if webhook_info.url:
+                        logger.error(f"Webhook всё ещё активен перед запуском polling: {webhook_info.url}")
+                        logger.info("Еще одна попытка удаления webhook...")
+                        await bot.delete_webhook(drop_pending_updates=True)
+                        
+                        # Если и это не помогло - используем прямой HTTP запрос
+                        webhook_info = await bot.get_webhook_info()
+                        if webhook_info.url:
+                            delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(delete_url) as response:
+                                    response_json = await response.json()
+                                    logger.info(f"Результат принудительного удаления webhook: {response_json}")
+                    
                     logger.info("Запуск polling...")
                     await dp.start_polling(bot)
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
