@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "7994914232:AAFlg-YfYKw9QQHY3jyZ22V14rXPwlGiq
 logger.info(f"Загружен токен бота: {BOT_TOKEN[:10]}...")
 
 # Настройки OpenRouter API
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 # Проверяем, что ключ не пустой и имеет правильный формат
 if not OPENROUTER_API_KEY or not OPENROUTER_API_KEY.startswith("sk-or-"):
     logger.error(f"Неверный формат API ключа OpenRouter: {OPENROUTER_API_KEY[:10]}...")
