@@ -6,6 +6,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
 import re
+import os
 
 from config import BOT_TOKEN
 from session_manager import SessionManager, UserState, GenerationMode, PostSize
@@ -486,16 +487,72 @@ async def test_api_connection():
         return False
 
 async def main():
-    # Удаляем webhook перед запуском
+    # Определяем, запущены ли мы на Railway
+    is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+    
+    # Принудительно удаляем webhook перед запуском
+    logger.info("Удаляем webhook...")
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Делаем двойную проверку, что webhook точно удален
+    webhook_info = await bot.get_webhook_info()
+    if webhook_info.url:
+        logger.warning(f"Webhook всё ещё активен: {webhook_info.url}. Пробуем удалить снова...")
+        await bot.delete_webhook(drop_pending_updates=True)
     
     # Проверяем соединение с API
     api_status = await test_api_connection()
     if not api_status:
         logger.warning("API недоступен, бот будет работать с заглушками")
     
-    # Запускаем бота
-    await dp.start_polling(bot)
+    if is_railway:
+        # На Railway запускаем бота в режиме webhook
+        logger.info("Запуск на Railway, используем webhook...")
+        
+        # Получаем URL для webhook
+        webhook_host = os.environ.get("RAILWAY_STATIC_URL", "https://your-app.up.railway.app")
+        webhook_path = f"/webhook/{BOT_TOKEN}"
+        webhook_url = f"{webhook_host}{webhook_path}"
+        
+        # Настраиваем webhook
+        await bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook установлен на {webhook_url}")
+        
+        # Используем FastAPI для обработки webhook
+        from fastapi import FastAPI, Request, Response
+        from fastapi.middleware.cors import CORSMiddleware
+        
+        app = FastAPI()
+        
+        # Настройка CORS
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        @app.post(webhook_path)
+        async def bot_webhook(request: Request):
+            update = await request.json()
+            await dp.feed_update(bot, update)
+            return Response(status_code=200)
+        
+        @app.get("/")
+        async def root():
+            return {"status": "Bot is running"}
+        
+        # Импортируем uvicorn для запуска FastAPI
+        import uvicorn
+        
+        # Запускаем сервер FastAPI
+        port = int(os.environ.get("PORT", 8000))
+        uvicorn.run(app, host="0.0.0.0", port=port)
+    else:
+        # Локально используем обычный polling
+        logger.info("Запуск в режиме polling...")
+        await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main()) 
