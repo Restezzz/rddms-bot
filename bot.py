@@ -474,14 +474,23 @@ async def test_api_connection():
     try:
         logger.info("Диагностика API подключения...")
         
-        # Простой запрос для проверки соединения
-        sample_text = await llm_client.generate_without_template(
-            topic="тестовый запрос",
-            post_size=PostSize.SMALL
-        )
-        
-        logger.info(f"Тестовый запрос к API выполнен успешно!")
-        return True
+        # Используем asyncio.wait_for для ограничения времени ожидания
+        import asyncio
+        try:
+            # Простой запрос для проверки соединения с таймаутом 10 секунд
+            await asyncio.wait_for(
+                llm_client.generate_without_template(
+                    topic="тестовый запрос",
+                    post_size=PostSize.SMALL
+                ), 
+                timeout=10.0
+            )
+            
+            logger.info("Тестовый запрос к API выполнен успешно!")
+            return True
+        except asyncio.TimeoutError:
+            logger.error("Тестовый запрос к API превысил таймаут (10 секунд)")
+            return False
     except Exception as e:
         logger.error(f"Тестовый запрос к API не удался: {e}")
         return False
@@ -492,43 +501,57 @@ app = None
 
 async def setup():
     """Инициализация бота и настройка webhook"""
-    # Определяем, запущены ли мы на Railway
-    is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
-    
-    # Принудительно удаляем webhook перед запуском
-    logger.info("Удаляем webhook...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Делаем двойную проверку, что webhook точно удален
-    webhook_info = await bot.get_webhook_info()
-    if webhook_info.url:
-        logger.warning(f"Webhook всё ещё активен: {webhook_info.url}. Пробуем удалить снова...")
-        await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Проверяем соединение с API
-    api_status = await test_api_connection()
-    if not api_status:
-        logger.warning("API недоступен, бот будет работать с заглушками")
-    
-    if is_railway:
-        # На Railway запускаем бота в режиме webhook
-        logger.info("Запуск на Railway, используем webhook...")
+    try:
+        # Определяем, запущены ли мы на Railway
+        is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
         
-        # Получаем URL для webhook
-        webhook_host = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", "https://your-app.up.railway.app"))
-        global webhook_path
-        webhook_path = f"/webhook/{BOT_TOKEN}"
-        webhook_url = f"{webhook_host}{webhook_path}"
+        # Принудительно удаляем webhook перед запуском
+        logger.info("Удаляем webhook...")
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            
+            # Делаем двойную проверку, что webhook точно удален
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url:
+                logger.warning(f"Webhook всё ещё активен: {webhook_info.url}. Пробуем удалить снова...")
+                await bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении webhook: {e}")
         
-        # Настраиваем webhook
-        await bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook установлен на {webhook_url}")
+        # Проверяем соединение с API
+        try:
+            api_status = await test_api_connection()
+            if not api_status:
+                logger.warning("API недоступен, бот будет работать с заглушками")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке API: {e}")
         
-        # Возвращаем True для webhook режима
+        if is_railway:
+            # На Railway запускаем бота в режиме webhook
+            logger.info("Запуск на Railway, используем webhook...")
+            
+            try:
+                # Получаем URL для webhook
+                webhook_host = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", "https://your-app.up.railway.app"))
+                global webhook_path
+                webhook_path = f"/webhook/{BOT_TOKEN}"
+                webhook_url = f"{webhook_host}{webhook_path}"
+                
+                # Настраиваем webhook
+                await bot.set_webhook(url=webhook_url)
+                logger.info(f"Webhook установлен на {webhook_url}")
+            except Exception as e:
+                logger.error(f"Ошибка при установке webhook: {e}")
+            
+            # Возвращаем True для webhook режима
+            return True
+        
+        # Для локального режима - False
+        return False
+    except Exception as e:
+        logger.error(f"Общая ошибка в setup(): {e}")
+        # Даже при ошибке возвращаем True, чтобы не блокировать запуск
         return True
-    
-    # Для локального режима - False
-    return False
 
 async def main():
     """Точка входа для запуска бота в режиме polling"""
@@ -540,11 +563,22 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Определяем, запущены ли мы на Railway
+    # Устанавливаем уровень логирования, чтобы видеть все сообщения
+    logging.basicConfig(level=logging.INFO, 
+                       format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger.info("===== Запуск бота =====")
+    
+    # Логируем параметры окружения
     is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+    logger.info(f"Запуск на Railway: {is_railway}")
+    if is_railway:
+        logger.info(f"PORT: {os.environ.get('PORT', 8000)}")
+        logger.info(f"RAILWAY_STATIC_URL: {os.environ.get('RAILWAY_STATIC_URL', 'не определен')}")
+        logger.info(f"RAILWAY_PUBLIC_DOMAIN: {os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'не определен')}")
     
     if is_railway:
         # Используем FastAPI для запуска в webhook режиме
+        logger.info("Инициализация FastAPI для webhook режима")
         from fastapi import FastAPI, Request, Response
         from fastapi.middleware.cors import CORSMiddleware
         import uvicorn
@@ -560,12 +594,10 @@ if __name__ == "__main__":
             allow_headers=["*"],
         )
         
-        @app.on_event("startup")
-        async def on_startup():
-            # Настраиваем webhook на запуске FastAPI
-            webhook_mode = await setup()
-            if not webhook_mode:
-                logger.warning("Настройка webhook не удалась, но сервер всё равно запущен")
+        # Объявляем healthcheck эндпоинт первым делом
+        @app.get("/")
+        async def root():
+            return {"status": "ok", "mode": "webhook"}
         
         @app.post("/webhook/{token}")
         async def bot_webhook(request: Request, token: str):
@@ -575,21 +607,25 @@ if __name__ == "__main__":
                 return Response(status_code=200)
             return Response(status_code=403)
         
-        @app.get("/")
-        async def root():
-            return {"status": "ok", "mode": "webhook"}
+        # Выносим настройку webhook в отдельный процесс
+        @app.on_event("startup")
+        async def on_startup():
+            # Запускаем настройку webhook в фоне
+            import asyncio
+            asyncio.create_task(setup())
+            logger.info("Сервер запущен и готов обрабатывать запросы")
         
-        # Запускаем сервер FastAPI с учетом асинхронного startup-эвента
+        # Запускаем сервер FastAPI
         port = int(os.environ.get("PORT", 8000))
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        logger.info(f"Запуск FastAPI сервера на порту {port}")
         
-        # Сначала выполняем настройку webhook
-        loop.run_until_complete(setup())
-        
-        # Затем запускаем сервер
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        try:
+            logger.info("Запуск uvicorn...")
+            uvicorn.run(app, host="0.0.0.0", port=port)
+        except Exception as e:
+            logger.critical(f"Критическая ошибка при запуске сервера: {e}")
+            import traceback
+            logger.critical(f"Трейсбек: {traceback.format_exc()}")
     else:
         # Локально используем asyncio для запуска в режиме polling
         asyncio.run(main()) 
