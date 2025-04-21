@@ -547,26 +547,32 @@ async def setup():
                 for var in railway_domain_vars:
                     if os.environ.get(var):
                         value = os.environ.get(var)
+                        # Если это просто имя сервиса без домена, добавляем домен Railway
+                        if not value.startswith("http") and "." not in value:
+                            value = f"{value}.up.railway.app"
+                        
                         webhook_host = value if value.startswith("http") else f"https://{value}"
                         logger.info(f"Использую {var} для webhook: {webhook_host}")
                         break
                 
-                # Проверяем специальную переменную Railway для доменного имени
-                if not webhook_host and os.environ.get("RAILWAY_SERVICE_APP_URL"):
-                    # Для Railway v2 API
-                    webhook_host = os.environ.get("RAILWAY_SERVICE_APP_URL")
-                    logger.info(f"Использую доменное имя из RAILWAY_SERVICE_APP_URL: {webhook_host}")
+                # Используем имя сервиса для создания стандартного URL Railway
+                if not webhook_host and os.environ.get("RAILWAY_SERVICE_NAME"):
+                    service_name = os.environ.get("RAILWAY_SERVICE_NAME")
+                    # Шаблон URL для Railway: https://имя-сервиса.up.railway.app
+                    webhook_host = f"https://{service_name}.up.railway.app"
+                    logger.info(f"Использую стандартный шаблон Railway по имени сервиса: {webhook_host}")
+                
+                # Используем проектное имя для создания стандартного URL Railway
+                if not webhook_host and os.environ.get("RAILWAY_PROJECT_NAME"):
+                    project_name = os.environ.get("RAILWAY_PROJECT_NAME")
+                    # Шаблон URL для Railway по имени проекта
+                    webhook_host = f"https://{project_name}.up.railway.app"
+                    logger.info(f"Использую стандартный шаблон Railway по имени проекта: {webhook_host}")
                 
                 # Смотрим статические переменные Railway PUBLIC_URL
                 if not webhook_host and os.environ.get("PUBLIC_URL"):
                     webhook_host = os.environ.get("PUBLIC_URL")
                     logger.info(f"Использую PUBLIC_URL: {webhook_host}")
-                
-                # Используем переменную RAILWAY_APP_NAME как домен
-                if not webhook_host and os.environ.get("RAILWAY_APP_NAME"):
-                    app_name = os.environ.get("RAILWAY_APP_NAME")
-                    webhook_host = f"https://{app_name}.up.railway.app"
-                    logger.info(f"Сгенерирован домен из RAILWAY_APP_NAME: {webhook_host}")
                 
                 # Если всё еще нет URL, используем имя хоста плюс порт
                 if not webhook_host:
@@ -599,6 +605,24 @@ async def setup():
                 
                 # Настраиваем webhook
                 logger.info(f"Устанавливаю webhook на {webhook_url}")
+                
+                # Сначала проверим, доступен ли домен
+                try:
+                    import socket
+                    # Извлекаем домен из URL
+                    domain = webhook_host.replace("https://", "").replace("http://", "").split("/")[0]
+                    logger.info(f"Проверяю доступность домена {domain}...")
+                    
+                    # Пытаемся разрешить домен
+                    socket.gethostbyname(domain)
+                    logger.info(f"Домен {domain} успешно разрешен!")
+                except Exception as e:
+                    logger.error(f"Домен {domain} не разрешается: {e}")
+                    # Если домен не разрешается, пробуем альтернативные варианты
+                    webhook_host = "https://refreshing-commitment.up.railway.app"
+                    webhook_url = f"{webhook_host}{webhook_path}"
+                    logger.warning(f"Использую хардкодированный URL Railway из проектного имени: {webhook_host}")
+                
                 try:
                     await bot.set_webhook(url=webhook_url)
                     logger.info("Webhook успешно установлен!")
