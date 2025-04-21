@@ -28,14 +28,19 @@ else:
     logger.info(f"Загружен API ключ OpenRouter: {OPENROUTER_API_KEY[:10]}...")
 
 # Расширенный список URL API для резервного подключения
+# ВАЖНО: используем только правильные пути к API /api/v1/chat/completions
 OPENROUTER_API_URLS = [
     "https://openrouter.ai/api/v1/chat/completions",
-    "https://api.openrouter.ai/api/v1/chat/completions", 
-    "https://openrouter.ai/v1/chat/completions",
-    "https://openrouterme.org/api/v1/chat/completions",
-    "https://openrouterme.org/v1/chat/completions"
+    "https://api.openrouter.ai/api/v1/chat/completions"
 ]
 logger.info(f"Загружено {len(OPENROUTER_API_URLS)} URL для API")
+
+# Прямые IP для обхода DNS блокировки (обновляются при изменении A-записей)
+DIRECT_IP_URLS = [
+    "https://13.226.158.10/api/v1/chat/completions",
+    "https://13.226.158.23/api/v1/chat/completions"
+]
+logger.info(f"Загружено {len(DIRECT_IP_URLS)} прямых IP URL для API")
 
 # Список разрешенных рефереров
 ALLOWED_REFERERS = [
@@ -49,6 +54,7 @@ ALLOWED_REFERERS = [
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "HTTP-Referer": ALLOWED_REFERERS[0],
+    "Content-Type": "application/json",
     "X-Title": "RDDM Bot"
 }
 

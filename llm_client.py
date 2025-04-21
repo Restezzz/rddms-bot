@@ -4,7 +4,8 @@ import json
 import aiohttp
 from config import (
     OPENROUTER_API_URLS, OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_HEADERS,
-    BACKUP_MODELS, REQUEST_TIMEOUT, MAX_RETRIES, ALLOWED_REFERERS, HTTP_PROXY, HTTPS_PROXY
+    BACKUP_MODELS, REQUEST_TIMEOUT, MAX_RETRIES, ALLOWED_REFERERS, HTTP_PROXY, HTTPS_PROXY,
+    DIRECT_IP_URLS
 )
 import logging
 from rddm_info import get_rddm_knowledge
@@ -32,6 +33,9 @@ class LLMClient:
         self.headers.update({
             "Content-Type": "application/json",
         })
+        
+        # Прямые IP URL для обхода блокировки DNS
+        self.direct_ip_urls = DIRECT_IP_URLS
         
         # Настройки прокси из конфига или переменных окружения
         self.http_proxy = HTTP_PROXY or os.environ.get('HTTP_PROXY')
@@ -278,24 +282,20 @@ class LLMClient:
         # Все возможные URL для API
         api_urls = self.api_urls.copy() if self.api_urls else []
         
-        # Добавим прямые API URL и альтернативные домены
-        all_urls = api_urls + [
-            "https://openrouter.ai/api/v1/chat/completions",
-            "https://api.openrouter.ai/api/v1/chat/completions",
-            "https://openrouter.ai/v1/chat/completions",
-            "https://openrouterme.org/api/v1/chat/completions",
-            "https://openrouterme.org/v1/chat/completions"
-        ]
+        # Правильные URL API для OpenRouter (обновленные)
+        all_urls = api_urls.copy()
         
-        # Используем IP-адреса напрямую (обход DNS-блокировки)
-        direct_ips = [
-            "https://13.226.158.10/api/v1/chat/completions",  # IP для openrouter.ai
-            "https://13.226.158.23/api/v1/chat/completions",  # Альтернативный IP
-            "https://18.155.68.111/api/v1/chat/completions"   # Еще альтернативный IP
-        ]
-        
-        # Добавляем прямые IP в список URL
-        all_urls.extend(direct_ips)
+        # Добавляем прямые IP URL из конфига
+        if hasattr(self, 'direct_ip_urls') and self.direct_ip_urls:
+            all_urls.extend(self.direct_ip_urls)
+        else:
+            # Используем IP-адреса напрямую (обход DNS-блокировки)
+            direct_ips = [
+                # Формат: https://IP/правильный_путь_к_API
+                "https://13.226.158.10/api/v1/chat/completions",  # IP для openrouter.ai
+                "https://13.226.158.23/api/v1/chat/completions"   # Альтернативный IP
+            ]
+            all_urls.extend(direct_ips)
         
         # Удаляем дубликаты, сохраняя порядок
         all_urls = list(dict.fromkeys(all_urls))
@@ -354,16 +354,12 @@ class LLMClient:
                     domain = urlparse(url).netloc
                     logger.info(f"Попытка {attempt_num} с моделью {current_model}: URL={url}, домен={domain}")
                     
-                    # Попытка вручную разрешить DNS, если это не IP адрес
-                    if not any(x in domain for x in ['.', ':']):
-                        try:
-                            import socket
-                            logger.info(f"Резолвинг домена {domain}...")
-                            ip = socket.gethostbyname(domain)
-                            logger.info(f"Домен {domain} разрешен в IP: {ip}")
-                        except Exception as dns_err:
-                            logger.warning(f"Не удалось разрешить домен {domain}: {dns_err}")
-                            # Продолжаем, aiohttp может использовать другие методы DNS
+                    # Проверяем, IP это или домен
+                    is_ip = all(c.isdigit() or c == '.' for c in domain.split(':')[0])
+                    
+                    # Если IP адрес, используем правильный Host заголовок
+                    if is_ip:
+                        logger.info(f"Обнаружен IP адрес: {domain}, будет использован Host заголовок")
                     
                     # Таймаут больше для первых попыток, меньше для последующих
                     timeout_seconds = self.request_timeout if attempt_num <= 3 else self.request_timeout // 2
@@ -381,9 +377,11 @@ class LLMClient:
                                 ttl_dns_cache=300  # Кэширование DNS на 5 минут
                             )
                             
-                            # Дополнительные заголовки для работы с прокси
+                            # Дополнительные заголовки для работы с прокси и IP
                             headers_with_host = headers.copy()
-                            headers_with_host["Host"] = domain
+                            if is_ip:
+                                # Если используем IP, явно указываем Host заголовок
+                                headers_with_host["Host"] = "openrouter.ai"
                             
                             async with aiohttp.ClientSession(connector=tcp_connector) as session:
                                 async with session.post(
@@ -402,29 +400,38 @@ class LLMClient:
                                         try:
                                             # Проверяем content-type
                                             content_type = response.headers.get('Content-Type', '')
-                                            if 'application/json' in content_type:
-                                                result = await response.json()
-                                            else:
-                                                # Принудительно декодируем JSON, даже если сервер вернул неверный Content-Type
-                                                text = await response.text()
-                                                logger.warning(f"Неожиданный Content-Type: {content_type}, пробуем вручную декодировать JSON")
-                                                import json
-                                                result = json.loads(text)
+                                            logger.info(f"Получен Content-Type: {content_type}")
                                             
-                                            if "choices" in result and len(result["choices"]) > 0:
-                                                message = result["choices"][0]["message"]
-                                                if message and "content" in message:
-                                                    logger.info(f"Успешный ответ от {url} с моделью {current_model}")
-                                                    return message["content"]
-                                                else:
-                                                    logger.warning("API вернул пустое содержимое")
-                                            else:
-                                                logger.warning("В ответе API отсутствуют choices")
-                                                logger.debug(f"Содержимое ответа: {str(result)[:200]}...")
-                                        except json.JSONDecodeError:
-                                            # Попробуем прочитать ответ как текст
+                                            # Читаем текст ответа
                                             text = await response.text()
-                                            logger.error(f"Ошибка парсинга JSON: {text[:200]}...")
+                                            
+                                            # Пытаемся распарсить JSON
+                                            try:
+                                                if 'application/json' in content_type:
+                                                    result = json.loads(text)
+                                                else:
+                                                    logger.warning(f"Неожиданный Content-Type: {content_type}, пробуем вручную декодировать JSON")
+                                                    if text.strip().startswith('{') and '"choices"' in text:
+                                                        result = json.loads(text)
+                                                    else:
+                                                        logger.error(f"Ответ не похож на JSON: {text[:200]}...")
+                                                        continue
+                                                
+                                                if "choices" in result and len(result["choices"]) > 0:
+                                                    message = result["choices"][0]["message"]
+                                                    if message and "content" in message:
+                                                        logger.info(f"Успешный ответ от {url} с моделью {current_model}")
+                                                        return message["content"]
+                                                    else:
+                                                        logger.warning("API вернул пустое содержимое")
+                                                else:
+                                                    logger.warning("В ответе API отсутствуют choices")
+                                                    logger.debug(f"Содержимое ответа: {str(result)[:200]}...")
+                                            except json.JSONDecodeError as e:
+                                                logger.error(f"Ошибка парсинга JSON: {e}")
+                                                logger.debug(f"Проблемный текст: {text[:200]}...")
+                                        except Exception as e:
+                                            logger.error(f"Ошибка при обработке ответа: {type(e).__name__}: {str(e)}")
                                     
                                     # Логируем текст ответа при ошибке
                                     if response.status != 200:
@@ -469,13 +476,25 @@ class LLMClient:
         last_model = models_to_try[-1]
         payload["model"] = last_model
         
-        # Список URL для синхронного запроса
-        sync_urls = random.sample(all_urls, min(5, len(all_urls)))
+        # Список URL для синхронного запроса - только проверенные URL
+        sync_urls = [
+            "https://openrouter.ai/api/v1/chat/completions",
+            "https://api.openrouter.ai/api/v1/chat/completions",
+            "https://13.226.158.10/api/v1/chat/completions"
+        ]
         
         for url in sync_urls:
             for headers in headers_variations[:2]:  # Только первые две вариации заголовков
                 logger.info(f"Синхронный запрос к {url} с моделью {last_model}")
                 try:
+                    # Проверяем, IP это или домен
+                    domain = urlparse(url).netloc
+                    is_ip = all(c.isdigit() or c == '.' for c in domain.split(':')[0])
+                    
+                    # Если IP адрес, добавляем Host заголовок
+                    if is_ip:
+                        headers["Host"] = "openrouter.ai"
+                    
                     # Пробуем запрос с большим таймаутом
                     response = requests.post(
                         url,
@@ -492,24 +511,33 @@ class LLMClient:
                         try:
                             # Проверка Content-Type
                             content_type = response.headers.get('Content-Type', '')
-                            result = None
+                            logger.info(f"Получен Content-Type: {content_type}")
                             
-                            if 'application/json' in content_type:
-                                result = response.json()
-                            else:
-                                # Принудительно декодируем JSON
-                                try:
-                                    import json
-                                    result = json.loads(response.text)
-                                    logger.warning(f"Декодирован JSON с неожиданным Content-Type: {content_type}")
-                                except:
-                                    logger.error(f"Не удалось декодировать ответ как JSON: {response.text[:200]}...")
+                            # Читаем текст ответа
+                            text = response.text
                             
-                            if result and "choices" in result and len(result["choices"]) > 0:
-                                message = result["choices"][0]["message"]
-                                if message and "content" in message:
-                                    logger.info(f"Успешный синхронный ответ с моделью {last_model}")
-                                    return message["content"]
+                            # Пытаемся распарсить JSON
+                            try:
+                                if 'application/json' in content_type:
+                                    result = json.loads(text)
+                                else:
+                                    if text.strip().startswith('{') and '"choices"' in text:
+                                        result = json.loads(text)
+                                        logger.warning(f"Декодирован JSON с неожиданным Content-Type: {content_type}")
+                                    else:
+                                        logger.error(f"Ответ не похож на JSON: {text[:200]}...")
+                                        continue
+                                
+                                if result and "choices" in result and len(result["choices"]) > 0:
+                                    message = result["choices"][0]["message"]
+                                    if message and "content" in message:
+                                        logger.info(f"Успешный синхронный ответ с моделью {last_model}")
+                                        return message["content"]
+                                    else:
+                                        logger.warning("API вернул пустое содержимое")
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Ошибка парсинга JSON: {e}")
+                                logger.debug(f"Проблемный текст: {text[:200]}...")
                         except Exception as e:
                             logger.error(f"Ошибка при обработке синхронного ответа: {e}")
                 except Exception as e:
