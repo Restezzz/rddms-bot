@@ -533,23 +533,65 @@ async def setup():
             
             try:
                 # Получаем URL для webhook
-                webhook_host = os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+                # Проверяем все возможные источники домена Railway
+                railway_domain_vars = [
+                    "RAILWAY_PUBLIC_DOMAIN",
+                    "RAILWAY_STATIC_URL",
+                    "RAILWAY_DOMAIN",
+                    "RAILWAY_SERVICE_NAME"
+                ]
                 
-                # Если не удалось получить URL из переменных окружения, используем динамическое определение
-                if not webhook_host:
-                    # Получаем URL из переменной RAILWAY_SERVICE_XXX_URL
-                    for key, value in os.environ.items():
-                        if key.startswith("RAILWAY_SERVICE_") and key.endswith("_URL"):
-                            webhook_host = value
-                            logger.info(f"Найден URL сервиса: {key}={webhook_host}")
-                            break
+                webhook_host = None
+                
+                # Проверяем переменные среды Railway
+                for var in railway_domain_vars:
+                    if os.environ.get(var):
+                        value = os.environ.get(var)
+                        webhook_host = value if value.startswith("http") else f"https://{value}"
+                        logger.info(f"Использую {var} для webhook: {webhook_host}")
+                        break
+                
+                # Проверяем специальную переменную Railway для доменного имени
+                if not webhook_host and os.environ.get("RAILWAY_SERVICE_APP_URL"):
+                    # Для Railway v2 API
+                    webhook_host = os.environ.get("RAILWAY_SERVICE_APP_URL")
+                    logger.info(f"Использую доменное имя из RAILWAY_SERVICE_APP_URL: {webhook_host}")
+                
+                # Смотрим статические переменные Railway PUBLIC_URL
+                if not webhook_host and os.environ.get("PUBLIC_URL"):
+                    webhook_host = os.environ.get("PUBLIC_URL")
+                    logger.info(f"Использую PUBLIC_URL: {webhook_host}")
+                
+                # Используем переменную RAILWAY_APP_NAME как домен
+                if not webhook_host and os.environ.get("RAILWAY_APP_NAME"):
+                    app_name = os.environ.get("RAILWAY_APP_NAME")
+                    webhook_host = f"https://{app_name}.up.railway.app"
+                    logger.info(f"Сгенерирован домен из RAILWAY_APP_NAME: {webhook_host}")
                 
                 # Если всё еще нет URL, используем имя хоста плюс порт
                 if not webhook_host:
-                    hostname = socket.gethostname()
-                    port = os.environ.get("PORT", 8000)
-                    webhook_host = f"https://{hostname}:{port}"
-                    logger.info(f"Использую hostname: {webhook_host}")
+                    import socket
+                    try:
+                        hostname = socket.gethostname()
+                        # Не добавляем порт в webhook URL, так как Telegram принимает только порты 80, 88, 443 или 8443
+                        webhook_host = f"https://{hostname}"
+                        logger.info(f"Использую hostname: {webhook_host}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении hostname: {e}")
+                        # Последний вариант - использовать фиксированный URL
+                        webhook_host = "https://rddm-bot.up.railway.app"
+                        logger.warning(f"Использую фиксированный URL: {webhook_host}")
+                
+                # Убедимся, что URL не содержит нестандартный порт
+                if ":" in webhook_host and any(p in webhook_host for p in ["8080", "8000", "3000"]):
+                    # Удаляем порт из URL
+                    webhook_host = webhook_host.split(":")[0] + ("" if webhook_host.startswith("https") else ":443")
+                    logger.info(f"Удален нестандартный порт из URL: {webhook_host}")
+                
+                # Проверяем, начинается ли URL с протокола
+                if not webhook_host.startswith("http"):
+                    webhook_host = "https://" + webhook_host
+                    logger.info(f"Добавлен протокол в URL: {webhook_host}")
                 
                 global webhook_path
                 webhook_path = f"/webhook/{BOT_TOKEN}"
@@ -557,7 +599,13 @@ async def setup():
                 
                 # Настраиваем webhook
                 logger.info(f"Устанавливаю webhook на {webhook_url}")
-                await bot.set_webhook(url=webhook_url)
+                try:
+                    await bot.set_webhook(url=webhook_url)
+                    logger.info("Webhook успешно установлен!")
+                except Exception as e:
+                    # Не останавливаем работу бота, если webhook не установился
+                    logger.error(f"Ошибка при установке webhook: {e}")
+                    logger.warning("Продолжаем работу бота без webhook. Это может повлиять на работу с Telegram, но сервер будет работать.")
             except Exception as e:
                 logger.error(f"Ошибка при установке webhook: {e}")
             
@@ -589,10 +637,16 @@ if __name__ == "__main__":
     # Логируем параметры окружения
     is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
     logger.info(f"Запуск на Railway: {is_railway}")
-    if is_railway:
-        logger.info(f"PORT: {os.environ.get('PORT', 8000)}")
-        logger.info(f"RAILWAY_STATIC_URL: {os.environ.get('RAILWAY_STATIC_URL', 'не определен')}")
-        logger.info(f"RAILWAY_PUBLIC_DOMAIN: {os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'не определен')}")
+    
+    # Логируем все переменные окружения, связанные с Railway
+    logger.info("=== Railway переменные окружения ===")
+    for key, value in sorted(os.environ.items()):
+        if "RAILWAY" in key or "URL" in key or "DOMAIN" in key or "HOST" in key:
+            # Скрываем токены и ключи
+            if any(secret in key.lower() for secret in ["token", "key", "secret", "password", "auth"]):
+                value = value[:10] + "..." if value and len(value) > 10 else value
+            logger.info(f"{key}: {value}")
+    logger.info("===================================")
     
     if is_railway:
         # Используем FastAPI для запуска в webhook режиме
