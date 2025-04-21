@@ -27,20 +27,15 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
-dp.include_router(router)
 
-# Добавляем глобальный обработчик для всех сообщений
-@dp.message()
-async def debug_echo(message: Message):
-    logger.info(f"DEBUG: Получено сообщение от {message.from_user.id}: {message.text if message.text else 'без текста'}")
-    try:
-        await message.answer("Я получил ваше сообщение и работаю! Это тестовый ответ.")
-        logger.info(f"DEBUG: Отправлен ответ пользователю {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"DEBUG: Ошибка при отправке ответа: {e}")
+# Создаем отдельный маршрутизатор для отладочных команд (с меньшим приоритетом)
+debug_router = Router(name="debug_router")
+
+# Важно: включаем router в диспетчер ПЕРЕД регистрацией других обработчиков
+dp.include_router(router)  # Основной маршрутизатор с приоритетом по умолчанию
 
 # Добавляем явный обработчик команды /start для отладки
-@dp.message(Command("start"))
+@debug_router.message(Command("start"))
 async def cmd_start_debug(message: Message):
     logger.info(f"DEBUG: Получена команда /start от {message.from_user.id}")
     try:
@@ -50,7 +45,7 @@ async def cmd_start_debug(message: Message):
         logger.error(f"DEBUG: Ошибка при отправке ответа на /start: {e}")
 
 # Добавляем обработчик команды /debug
-@dp.message(Command("debug"))
+@debug_router.message(Command("debug"))
 async def cmd_debug(message: Message):
     logger.info(f"DEBUG: Получена команда /debug от {message.from_user.id}")
     try:
@@ -65,6 +60,9 @@ async def cmd_debug(message: Message):
         logger.info(f"DEBUG: Отправлена отладочная информация пользователю {message.from_user.id}")
     except Exception as e:
         logger.error(f"DEBUG: Ошибка при отправке отладочной информации: {e}")
+
+# Добавляем отладочный маршрутизатор ПОСЛЕДНИМ, чтобы он имел самый низкий приоритет
+dp.include_router(debug_router)
 
 # Инициализация менеджера сессий и клиента LLM
 session_manager = SessionManager()
