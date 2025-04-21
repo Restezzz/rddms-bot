@@ -353,7 +353,7 @@ async def process_size_selection(callback_query: CallbackQuery):
         except TelegramBadRequest as e:
             logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
             # Если возникла ошибка, отправляем без форматирования
-            await callback_query.message.answer(generated_post)
+        await callback_query.message.answer(generated_post)
         
         # Создаем инлайн-кнопки для действий с постом
         actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -416,7 +416,7 @@ async def cmd_change(message: Message, user_id: int):
         post_message = await message.answer(f"Текущий пост:\n\n{html_text}", parse_mode="HTML")
     except TelegramBadRequest as e:
         logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-        post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
+    post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
     
     # Сохраняем ID сообщения с текущим постом
     session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
@@ -489,7 +489,7 @@ async def process_message(message: Message):
                 await message.answer(html_text, parse_mode="HTML")
             except TelegramBadRequest as e:
                 logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-                await message.answer(modified_post)
+            await message.answer(modified_post)
             
             # Создаем инлайн-кнопки для дальнейших действий
             actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[

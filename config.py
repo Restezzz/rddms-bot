@@ -27,57 +27,21 @@ if not OPENROUTER_API_KEY or not OPENROUTER_API_KEY.startswith("sk-or-"):
 else:
     logger.info(f"Загружен API ключ OpenRouter: {OPENROUTER_API_KEY[:10]}...")
 
-# Расширенный список URL API для резервного подключения
-# ВАЖНО: используем только правильные пути к API /api/v1/chat/completions
+# URL API может меняться
 OPENROUTER_API_URLS = [
     "https://openrouter.ai/api/v1/chat/completions",
-    "https://api.openrouter.ai/api/v1/chat/completions"
+    "https://api.openrouter.ai/api/v1/chat/completions", 
+    "https://openrouter.ai/v1/chat/completions"
 ]
-logger.info(f"Загружено {len(OPENROUTER_API_URLS)} URL для API")
-
-# Прямые IP для обхода DNS блокировки (обновляются при изменении A-записей)
-DIRECT_IP_URLS = [
-    "https://13.226.158.10/api/v1/chat/completions",
-    "https://13.226.158.23/api/v1/chat/completions"
-]
-logger.info(f"Загружено {len(DIRECT_IP_URLS)} прямых IP URL для API")
-
-# Список разрешенных рефереров
-ALLOWED_REFERERS = [
-    "https://timeweb.cloud",
-    "https://railway.app",
-    "https://localhost",
-    "https://rddm-bot.ru"
-]
+logger.info(f"Основной URL API: {OPENROUTER_API_URLS[0]}")
 
 # Заголовки для OpenRouter API
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "HTTP-Referer": ALLOWED_REFERERS[0],
-    "Content-Type": "application/json",
+    "HTTP-Referer": "https://railway.app",
     "X-Title": "RDDM Bot"
 }
 
-# Настройки прокси из переменных окружения
-HTTP_PROXY = os.getenv("HTTP_PROXY")
-HTTPS_PROXY = os.getenv("HTTPS_PROXY")
-
-if HTTP_PROXY or HTTPS_PROXY:
-    logger.info(f"Найдены настройки прокси: HTTP={HTTP_PROXY}, HTTPS={HTTPS_PROXY}")
-    # Устанавливаем прокси для requests
-    os.environ["REQUESTS_CA_BUNDLE"] = os.getenv("REQUESTS_CA_BUNDLE", "")
-
 # Модель
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-4-maverick:free")
-# Альтернативные модели для бэкапа, если основная недоступна
-BACKUP_MODELS = [
-    "anthropic/claude-3-haiku",
-    "openai/gpt-3.5-turbo",
-    "google/gemini-pro"
-]
-logger.info(f"Основная модель: {OPENROUTER_MODEL}")
-
-# Таймауты для запросов
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-logger.info(f"Таймаут запросов: {REQUEST_TIMEOUT}с, макс. попыток: {MAX_RETRIES}") 
+logger.info(f"Используем модель: {OPENROUTER_MODEL}") 
