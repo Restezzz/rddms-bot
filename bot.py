@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
 import re
 import os
 import socket
+import json
 
 from config import BOT_TOKEN
 from session_manager import SessionManager, UserState, GenerationMode, PostSize
@@ -539,9 +540,7 @@ async def test_api_connection():
 
 async def main():
     """Точка входа для запуска бота в режиме polling"""
-    # Удаляем webhook перед запуском
-    logger.info("Удаляем webhook...")
-    await bot.delete_webhook(drop_pending_updates=True)
+    # НЕ удаляем webhook здесь, так как это уже сделано перед вызовом этой функции
     
     # Проверяем соединение с API
     try:
@@ -587,6 +586,46 @@ if __name__ == "__main__":
                 value = value[:10] + "..." if value and len(value) > 10 else value
             logger.info(f"{key}: {value}")
     logger.info("===================================")
+    
+    # Если запущено на Railway, запускаем HTTP-сервер для healthcheck
+    if is_railway:
+        import threading
+        import http.server
+        import socketserver
+        
+        # Создаем простой HTTP-сервер для ответа на healthcheck
+        class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "mode": "polling"}).encode())
+                # Логируем только обращения к корневому пути
+                if self.path == "/":
+                    logger.info(f"Обработан healthcheck запрос: {self.path}")
+                
+            # Отключаем логирование запросов
+            def log_message(self, format, *args):
+                # Логируем только ошибки 4xx и 5xx
+                if args[1].startswith('4') or args[1].startswith('5'):
+                    logger.warning(f"HTTP ошибка: {args[0]} {args[1]} {args[2]}")
+                return
+        
+        # Запускаем сервер в отдельном потоке
+        def run_http_server():
+            port = int(os.environ.get("PORT", 8080))
+            logger.info(f"Запуск HTTP сервера для healthcheck на порту {port}")
+            try:
+                with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+                    logger.info(f"HTTP сервер запущен на порту {port}")
+                    httpd.serve_forever()
+            except Exception as e:
+                logger.error(f"Ошибка запуска HTTP сервера: {e}")
+        
+        # Запускаем HTTP сервер в отдельном потоке
+        http_thread = threading.Thread(target=run_http_server, daemon=True)
+        http_thread.start()
+        logger.info("HTTP сервер запущен в отдельном потоке")
     
     # ВСЕГДА ИСПОЛЬЗУЕМ POLLING РЕЖИМ
     logger.info("ЗАПУСК БОТА В РЕЖИМЕ POLLING...")
