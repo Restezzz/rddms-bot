@@ -14,6 +14,7 @@ from urllib3.exceptions import InsecureRequestWarning
 import urllib3
 import time
 import random
+from urllib.parse import urlparse
 
 # Отключаем предупреждения SSL для отладки
 urllib3.disable_warnings(InsecureRequestWarning)
@@ -286,6 +287,16 @@ class LLMClient:
             "https://openrouterme.org/v1/chat/completions"
         ]
         
+        # Используем IP-адреса напрямую (обход DNS-блокировки)
+        direct_ips = [
+            "https://13.226.158.10/api/v1/chat/completions",  # IP для openrouter.ai
+            "https://13.226.158.23/api/v1/chat/completions",  # Альтернативный IP
+            "https://18.155.68.111/api/v1/chat/completions"   # Еще альтернативный IP
+        ]
+        
+        # Добавляем прямые IP в список URL
+        all_urls.extend(direct_ips)
+        
         # Удаляем дубликаты, сохраняя порядок
         all_urls = list(dict.fromkeys(all_urls))
         
@@ -339,7 +350,20 @@ class LLMClient:
                     break
                     
                 try:
-                    logger.info(f"Попытка {attempt_num} с моделью {current_model}: URL={url}, Referer={headers.get('HTTP-Referer', 'None')}")
+                    # Извлекаем домен из URL для DNS проверки
+                    domain = urlparse(url).netloc
+                    logger.info(f"Попытка {attempt_num} с моделью {current_model}: URL={url}, домен={domain}")
+                    
+                    # Попытка вручную разрешить DNS, если это не IP адрес
+                    if not any(x in domain for x in ['.', ':']):
+                        try:
+                            import socket
+                            logger.info(f"Резолвинг домена {domain}...")
+                            ip = socket.gethostbyname(domain)
+                            logger.info(f"Домен {domain} разрешен в IP: {ip}")
+                        except Exception as dns_err:
+                            logger.warning(f"Не удалось разрешить домен {domain}: {dns_err}")
+                            # Продолжаем, aiohttp может использовать другие методы DNS
                     
                     # Таймаут больше для первых попыток, меньше для последующих
                     timeout_seconds = self.request_timeout if attempt_num <= 3 else self.request_timeout // 2
@@ -350,31 +374,57 @@ class LLMClient:
                     # Пробуем с SSL и без
                     for ssl_verify in [False, True]:
                         try:
-                            async with aiohttp.ClientSession() as session:
+                            # TCP-соединение, необходимое для использования с некоторыми прокси
+                            tcp_connector = aiohttp.TCPConnector(
+                                ssl=ssl_verify,
+                                force_close=True,  # Закрывать соединение после использования
+                                ttl_dns_cache=300  # Кэширование DNS на 5 минут
+                            )
+                            
+                            # Дополнительные заголовки для работы с прокси
+                            headers_with_host = headers.copy()
+                            headers_with_host["Host"] = domain
+                            
+                            async with aiohttp.ClientSession(connector=tcp_connector) as session:
                                 async with session.post(
                                     url, 
                                     json=payload, 
-                                    headers=headers,
+                                    headers=headers_with_host,
                                     proxy=self.https_proxy,  # Используем прокси напрямую в aiohttp
-                                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+                                    timeout=aiohttp.ClientTimeout(total=timeout_seconds, connect=timeout_seconds//2),
                                     ssl=ssl_verify
                                 ) as response:
                                     elapsed_time = time.time() - start_time
                                     logger.info(f"Ответ: статус={response.status}, время={elapsed_time:.2f}с, SSL={ssl_verify}")
                                     
+                                    # Проверяем статус ответа перед чтением тела
                                     if response.status == 200:
                                         try:
-                                            result = await response.json()
+                                            # Проверяем content-type
+                                            content_type = response.headers.get('Content-Type', '')
+                                            if 'application/json' in content_type:
+                                                result = await response.json()
+                                            else:
+                                                # Принудительно декодируем JSON, даже если сервер вернул неверный Content-Type
+                                                text = await response.text()
+                                                logger.warning(f"Неожиданный Content-Type: {content_type}, пробуем вручную декодировать JSON")
+                                                import json
+                                                result = json.loads(text)
+                                            
                                             if "choices" in result and len(result["choices"]) > 0:
                                                 message = result["choices"][0]["message"]
                                                 if message and "content" in message:
                                                     logger.info(f"Успешный ответ от {url} с моделью {current_model}")
                                                     return message["content"]
+                                                else:
+                                                    logger.warning("API вернул пустое содержимое")
+                                            else:
+                                                logger.warning("В ответе API отсутствуют choices")
+                                                logger.debug(f"Содержимое ответа: {str(result)[:200]}...")
                                         except json.JSONDecodeError:
                                             # Попробуем прочитать ответ как текст
                                             text = await response.text()
                                             logger.error(f"Ошибка парсинга JSON: {text[:200]}...")
-                                            continue
                                     
                                     # Логируем текст ответа при ошибке
                                     if response.status != 200:
@@ -385,12 +435,23 @@ class LLMClient:
                                     if response.status == 401:
                                         logger.error("Неверный API ключ. Пропускаем все дальнейшие попытки с этим ключом.")
                                         return self._get_fallback_response(user_prompt)
-                                    
+                            
                             # Если дошли сюда без ошибок, но успешного ответа не получили - идем дальше
                             break
                             
                         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                             logger.warning(f"Ошибка {type(e).__name__} при SSL={ssl_verify}: {str(e)}")
+                            # Специфические ошибки для более точной диагностики
+                            if isinstance(e, aiohttp.ClientConnectorError):
+                                logger.error(f"Не удалось подключиться к {domain}. Проверьте сетевое соединение или прокси.")
+                            elif isinstance(e, aiohttp.ServerDisconnectedError):
+                                logger.error(f"Сервер {domain} разорвал соединение.")
+                            elif isinstance(e, aiohttp.ClientResponseError):
+                                logger.error(f"Ошибка HTTP: {e.status}, {e.message}")
+                            elif isinstance(e, aiohttp.ClientPayloadError):
+                                logger.error(f"Ошибка чтения ответа от {domain}")
+                            elif isinstance(e, aiohttp.ClientOSError):
+                                logger.error(f"Системная ошибка ввода/вывода: {str(e)}")
                             # Продолжаем со следующим ssl_verify или переходим к следующей комбинации
                     
                     # Небольшая задержка между попытками
@@ -409,18 +470,19 @@ class LLMClient:
         payload["model"] = last_model
         
         # Список URL для синхронного запроса
-        sync_urls = random.sample(all_urls, min(3, len(all_urls)))
+        sync_urls = random.sample(all_urls, min(5, len(all_urls)))
         
         for url in sync_urls:
             for headers in headers_variations[:2]:  # Только первые две вариации заголовков
                 logger.info(f"Синхронный запрос к {url} с моделью {last_model}")
                 try:
+                    # Пробуем запрос с большим таймаутом
                     response = requests.post(
                         url,
                         json=payload,
                         headers=headers,
                         proxies=proxy_settings,
-                        timeout=self.request_timeout // 2,  # Уменьшаем таймаут для синхронных запросов
+                        timeout=self.request_timeout,  # Большой таймаут для синхронного запроса
                         verify=False  # Отключаем проверку SSL
                     )
                     
@@ -428,8 +490,22 @@ class LLMClient:
                     
                     if response.status_code == 200:
                         try:
-                            result = response.json()
-                            if "choices" in result and len(result["choices"]) > 0:
+                            # Проверка Content-Type
+                            content_type = response.headers.get('Content-Type', '')
+                            result = None
+                            
+                            if 'application/json' in content_type:
+                                result = response.json()
+                            else:
+                                # Принудительно декодируем JSON
+                                try:
+                                    import json
+                                    result = json.loads(response.text)
+                                    logger.warning(f"Декодирован JSON с неожиданным Content-Type: {content_type}")
+                                except:
+                                    logger.error(f"Не удалось декодировать ответ как JSON: {response.text[:200]}...")
+                            
+                            if result and "choices" in result and len(result["choices"]) > 0:
                                 message = result["choices"][0]["message"]
                                 if message and "content" in message:
                                     logger.info(f"Успешный синхронный ответ с моделью {last_model}")

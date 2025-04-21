@@ -1,0 +1,23 @@
+# Добавьте эти строки в файл hosts для обхода блокировки DNS
+# Windows: C:\Windows\System32\drivers\etc\hosts
+# Linux/macOS: /etc/hosts
+
+# OpenRouter API - основные IP-адреса
+13.226.158.10 openrouter.ai
+13.226.158.10 api.openrouter.ai
+18.155.68.111 openrouterme.org
+
+# Альтернативные IP-адреса (если основные не работают)
+13.226.158.23 openrouter.ai
+13.226.158.23 api.openrouter.ai
+18.155.68.80 openrouterme.org
+
+# Для использования в Windows выполните в командной строке с правами администратора:
+# notepad C:\Windows\System32\drivers\etc\hosts
+# 
+# Для использования в Linux/macOS выполните в терминале:
+# sudo nano /etc/hosts
+#
+# После редактирования файла hosts может потребоваться:
+# 1. Очистить DNS-кэш (Windows: ipconfig /flushdns, Linux: sudo systemd-resolve --flush-caches)
+# 2. Перезапустить браузер или приложение 
