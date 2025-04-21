@@ -2,7 +2,10 @@ import requests
 import asyncio
 import json
 import aiohttp
-from config import OPENROUTER_API_URLS, OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_HEADERS
+from config import (
+    OPENROUTER_API_URLS, OPENROUTER_API_KEY, OPENROUTER_MODEL, 
+    OPENROUTER_HEADERS, DEBUG_MODE, DISABLE_SSL_VERIFY, ALTERNATIVE_MODELS
+)
 import logging
 from rddm_info import get_rddm_knowledge
 from session_manager import PostSize
@@ -11,14 +14,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class LLMClient:
-    def __init__(self, api_urls=OPENROUTER_API_URLS, api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL, headers=OPENROUTER_HEADERS):
+    def __init__(self, api_urls=OPENROUTER_API_URLS, api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL, headers=OPENROUTER_HEADERS, debug=DEBUG_MODE, disable_ssl=DISABLE_SSL_VERIFY):
         self.api_urls = api_urls
         self.api_key = api_key
         self.model = model
         self.headers = headers.copy()
         self.headers.update({
             "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
+        self.debug = debug
+        self.disable_ssl = disable_ssl
+        
+        if self.debug:
+            logger.info(f"LLMClient инициализирован с моделью {model}")
+            logger.info(f"SSL проверка: {'отключена' if disable_ssl else 'включена'}")
     
     async def generate_from_template(self, template_post, topic, post_size=PostSize.LARGE, language="ru"):
         """Генерирует пост на основе шаблона и темы."""
@@ -254,11 +264,21 @@ class LLMClient:
         # Альтернативные URL для API
         api_urls = self.api_urls
         
+        # Список моделей для попытки: сначала основная, потом альтернативные
+        models_to_try = [self.model] + ALTERNATIVE_MODELS
+        
+        # Счетчик ошибок для переключения между моделями
+        model_errors = 0
+        max_model_errors = 3  # После трех ошибок переключаемся на новую модель
+        current_model_index = 0
+        
         for attempt, current_url in enumerate(api_urls, 1):
+            current_model = models_to_try[current_model_index]
+            
             try:
                 # Подготовка данных для запроса в формате OpenAI API
                 payload = {
-                    "model": self.model,
+                    "model": current_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -269,40 +289,109 @@ class LLMClient:
                 
                 # Обновленный набор заголовков
                 headers = self.headers.copy()
+                headers["Content-Type"] = "application/json"
+                headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                 
-                logger.info(f"Попытка {attempt}/{len(api_urls)}: Отправка запроса к {current_url} для модели {self.model}")
+                logger.info(f"Попытка {attempt}/{len(api_urls)}: Отправка запроса к {current_url} для модели {current_model}")
                 
-                # Используем aiohttp для асинхронных запросов
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        current_url, 
-                        json=payload, 
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=60)  # Увеличенный таймаут
-                    ) as response:
-                        if response.status != 200:
-                            error_text = await response.text()
-                            logger.error(f"Ошибка API (попытка {attempt}): {response.status}, {error_text}")
-                            # Продолжаем к следующему URL, если ошибка авторизации
-                            if response.status == 401 and attempt < len(api_urls):
-                                logger.info(f"Пробуем альтернативный URL...")
-                                continue
-                            # Если все URL не сработали или другая ошибка
-                            return self._get_fallback_response(user_prompt)
+                # Проверяем, нужно ли переключиться на другую модель
+                if model_errors >= max_model_errors and current_model_index < len(models_to_try) - 1:
+                    current_model_index += 1
+                    current_model = models_to_try[current_model_index]
+                    logger.info(f"Слишком много ошибок, переключаемся на новую модель: {current_model}")
+                    model_errors = 0
+                
+                # Проверка DNS разрешения перед запросом
+                try:
+                    import socket
+                    host = current_url.split("//")[1].split("/")[0]
+                    logger.info(f"Проверка DNS для {host}...")
+                    ip = socket.gethostbyname(host)
+                    logger.info(f"DNS разрешено: {host} -> {ip}")
+                except Exception as dns_err:
+                    logger.error(f"Ошибка DNS разрешения для {host}: {dns_err}")
+                    if attempt < len(api_urls):
+                        logger.info(f"Пробуем альтернативный URL...")
+                        continue
+                    else:
+                        return self._get_fallback_response(user_prompt)
+                
+                # Отключаем проверку SSL для отладки и решения проблем с сертификатами
+                connector = aiohttp.TCPConnector(ssl=False if self.disable_ssl else None, force_close=True)
+                timeout = aiohttp.ClientTimeout(total=90, connect=30)
+                
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    try:
+                        if self.debug:
+                            logger.info(f"Заголовки запроса: {headers}")
+                            logger.info(f"Payload: {json.dumps(payload)[:200]}...")
                         
-                        result = await response.json()
-                        
-                        # Извлекаем ответ из структуры OpenAI API
-                        if "choices" in result and len(result["choices"]) > 0:
-                            message = result["choices"][0]["message"]
-                            if message and "content" in message:
-                                return message["content"]
+                        async with session.post(
+                            current_url, 
+                            json=payload, 
+                            headers=headers
+                        ) as response:
+                            status = response.status
+                            content_type = response.headers.get('Content-Type', 'неизвестно')
+                            logger.info(f"Статус ответа: {status}, Content-Type: {content_type}")
+                            
+                            # Получаем сырой ответ для отладки
+                            raw_response = await response.text()
+                            logger.info(f"Сырой ответ (первые 200 символов): {raw_response[:200]}...")
+                            
+                            if status != 200:
+                                logger.error(f"Ошибка API (попытка {attempt}): {status}, {raw_response[:500]}")
+                                # Продолжаем к следующему URL, если ошибка
+                                if attempt < len(api_urls):
+                                    logger.info(f"Пробуем альтернативный URL...")
+                                    continue
+                                # Если все URL не сработали
+                                return self._get_fallback_response(user_prompt)
+                            
+                            # Проверяем формат ответа
+                            if not content_type or 'application/json' not in content_type:
+                                logger.warning(f"Неверный Content-Type: {content_type}, пробуем распарсить как JSON")
+                                model_errors += 1  # Увеличиваем счетчик ошибок модели
+                            
+                            try:
+                                result = json.loads(raw_response)
+                                
+                                # Извлекаем ответ из структуры OpenAI API
+                                if "choices" in result and len(result["choices"]) > 0:
+                                    message = result["choices"][0]["message"]
+                                    if message and "content" in message:
+                                        logger.info("Успешно получен ответ от API")
+                                        return message["content"]
+                                
+                                # Если JSON получен, но не в ожидаемом формате
+                                logger.error(f"Неожиданный формат JSON: {json.dumps(result)[:200]}...")
+                                model_errors += 1  # Увеличиваем счетчик ошибок модели
+                                
+                            except json.JSONDecodeError:
+                                logger.error(f"Не удалось распарсить JSON из ответа")
+                                model_errors += 1  # Увеличиваем счетчик ошибок модели
+                                # Продолжаем к следующему URL
+                                if attempt < len(api_urls):
+                                    logger.info(f"Пробуем альтернативный URL...")
+                                    continue
+                    except aiohttp.ClientConnectorError as conn_err:
+                        logger.error(f"Ошибка соединения (попытка {attempt}): {conn_err}")
+                        model_errors += 1  # Увеличиваем счетчик ошибок модели
+                        if attempt < len(api_urls):
+                            logger.info(f"Пробуем альтернативный URL...")
+                            continue
+                    except asyncio.TimeoutError:
+                        logger.error(f"Таймаут соединения (попытка {attempt})")
+                        model_errors += 1  # Увеличиваем счетчик ошибок модели
+                        if attempt < len(api_urls):
+                            logger.info(f"Пробуем альтернативный URL...")
+                            continue
                 
                 # Если дошли сюда, то запрос прошел без ошибок, но формат ответа неожиданный
                 logger.error(f"Неожиданный формат ответа (попытка {attempt})")
                 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.error(f"Ошибка при обращении к API (попытка {attempt}): {e}")
+            except Exception as e:
+                logger.error(f"Непредвиденная ошибка при запросе API (попытка {attempt}): {e}")
                 # Продолжаем к следующему URL, если не последняя попытка
                 if attempt < len(api_urls):
                     logger.info(f"Пробуем альтернативный URL...")
@@ -314,9 +403,94 @@ class LLMClient:
     
     def _get_fallback_response(self, user_prompt):
         """Возвращает заглушку при ошибках API."""
+        logger.info("Попытка вызова API через библиотеку requests (запасной вариант)")
+        
+        try:
+            # Проверка прямого доступа к https://api.openai.com с ключом OpenRouter
+            openai_url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            payload = {
+                "model": "gpt-3.5-turbo",  # Используем стандартную модель OpenAI
+                "messages": [
+                    {"role": "system", "content": "Ты помощник, который отвечает кратко и точно."},
+                    {"role": "user", "content": "Напиши короткое приветствие для поста в соцсети (до 100 символов)"}
+                ],
+                "max_tokens": 256,
+                "temperature": 0.7
+            }
+            
+            logger.info(f"Отправка запасного запроса напрямую к OpenAI API")
+            response = requests.post(
+                openai_url, 
+                headers=headers, 
+                json=payload, 
+                timeout=30, 
+                verify=not self.disable_ssl
+            )
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        message = result["choices"][0]["message"]
+                        if message and "content" in message:
+                            logger.info("Успешно получен ответ через запасной вариант OpenAI API")
+                            return message["content"]
+                except Exception as json_err:
+                    logger.error(f"Ошибка при обработке JSON в запасном варианте OpenAI: {json_err}")
+            else:
+                logger.error(f"Ошибка запасного запроса OpenAI: {response.status_code}, {response.text[:200]}")
+            
+            # Стандартный fallback, если все остальное не работает
+            # Используем requests для синхронного запроса как последнюю надежду
+            url = self.api_urls[0]  # Используем первый URL из списка
+            headers = self.headers.copy()
+            headers["Content-Type"] = "application/json"
+            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "Ты помощник, который отвечает кратко и точно."},
+                    {"role": "user", "content": "Напиши короткое приветствие для поста в соцсети (до 100 символов)"}
+                ],
+                "max_tokens": 256,
+                "temperature": 0.7
+            }
+            
+            logger.info(f"Отправка запасного запроса через requests к {url}")
+            response = requests.post(
+                url, 
+                headers=headers, 
+                json=payload, 
+                timeout=30, 
+                verify=not self.disable_ssl
+            )
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        message = result["choices"][0]["message"]
+                        if message and "content" in message:
+                            logger.info("Успешно получен ответ через запасной вариант requests")
+                            return message["content"]
+                except Exception as json_err:
+                    logger.error(f"Ошибка при обработке JSON в запасном варианте: {json_err}")
+            else:
+                logger.error(f"Ошибка запасного запроса: {response.status_code}, {response.text[:200]}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении запасного запроса: {e}")
+        
         logger.info("Генерация заглушки для демонстрации работы бота")
         
-        # Создаем примерный ответ с HTML-форматированием
+        # Создаем примерный ответ с HTML-форматированием если все запросы не сработали
         if "шаблону" in user_prompt:
             return "👋 Привет от **РДДМ**!\n\nМы рады видеть тебя в нашем сообществе. **Движение первых** - это место, где каждый может проявить себя и стать частью большой дружной команды.\n\n✨ Присоединяйся к нам и открывай новые возможности для саморазвития!\n\nПодробности на сайте [будьвдвижении.рф](https://будьвдвижении.рф) 🚀"
         else:

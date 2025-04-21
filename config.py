@@ -29,19 +29,35 @@ else:
 
 # URL API может меняться
 OPENROUTER_API_URLS = [
-    "https://openrouter.ai/api/v1/chat/completions",
-    "https://api.openrouter.ai/api/v1/chat/completions", 
-    "https://openrouter.ai/v1/chat/completions"
+    "https://api.openrouter.ai/api/v1/chat/completions",  # Сначала другой поддомен
+    "https://openrouter.ai/api/v1/chat/completions", 
+    "https://openrouter.ai/v1/chat/completions",
+    "https://openrouter.ai/api/chat/completions",
+    "https://api.openai.com/v1/chat/completions",  # Последняя надежда - обычное API OpenAI
 ]
 logger.info(f"Основной URL API: {OPENROUTER_API_URLS[0]}")
 
 # Заголовки для OpenRouter API
 OPENROUTER_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "HTTP-Referer": "https://railway.app",
+    "Referer": "https://railway.app",
     "X-Title": "RDDM Bot"
 }
 
 # Модель
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-4-maverick:free")
-logger.info(f"Используем модель: {OPENROUTER_MODEL}") 
+logger.info(f"Используем модель: {OPENROUTER_MODEL}")
+
+# Альтернативные модели (если основная не работает)
+ALTERNATIVE_MODELS = [
+    "anthropic/claude-3-sonnet:beta",
+    "anthropic/claude-3-haiku:beta",
+    "openai/gpt-3.5-turbo",
+    "google/gemini-1.5-pro"
+]
+logger.info(f"Доступно {len(ALTERNATIVE_MODELS)} альтернативных моделей")
+
+# Настройки отладки и безопасности
+DEBUG_MODE = True  # Режим отладки для дополнительной информации
+DISABLE_SSL_VERIFY = True  # Отключение проверки SSL сертификатов
+logger.info(f"Режим отладки: {DEBUG_MODE}, Проверка SSL: {not DISABLE_SSL_VERIFY}") 
