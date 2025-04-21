@@ -486,7 +486,12 @@ async def test_api_connection():
         logger.error(f"Тестовый запрос к API не удался: {e}")
         return False
 
-async def main():
+# Глобальные переменные для webhook режима
+webhook_path = None
+app = None
+
+async def setup():
+    """Инициализация бота и настройка webhook"""
     # Определяем, запущены ли мы на Railway
     is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
     
@@ -510,7 +515,8 @@ async def main():
         logger.info("Запуск на Railway, используем webhook...")
         
         # Получаем URL для webhook
-        webhook_host = os.environ.get("RAILWAY_STATIC_URL", "https://your-app.up.railway.app")
+        webhook_host = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", "https://your-app.up.railway.app"))
+        global webhook_path
         webhook_path = f"/webhook/{BOT_TOKEN}"
         webhook_url = f"{webhook_host}{webhook_path}"
         
@@ -518,9 +524,30 @@ async def main():
         await bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook установлен на {webhook_url}")
         
-        # Используем FastAPI для обработки webhook
+        # Возвращаем True для webhook режима
+        return True
+    
+    # Для локального режима - False
+    return False
+
+async def main():
+    """Точка входа для запуска бота в режиме polling"""
+    # Удаляем webhook перед запуском
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем бота
+    logger.info("Запуск в режиме polling...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    # Определяем, запущены ли мы на Railway
+    is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+    
+    if is_railway:
+        # Используем FastAPI для запуска в webhook режиме
         from fastapi import FastAPI, Request, Response
         from fastapi.middleware.cors import CORSMiddleware
+        import uvicorn
         
         app = FastAPI()
         
@@ -533,26 +560,36 @@ async def main():
             allow_headers=["*"],
         )
         
-        @app.post(webhook_path)
-        async def bot_webhook(request: Request):
-            update = await request.json()
-            await dp.feed_update(bot, update)
-            return Response(status_code=200)
+        @app.on_event("startup")
+        async def on_startup():
+            # Настраиваем webhook на запуске FastAPI
+            webhook_mode = await setup()
+            if not webhook_mode:
+                logger.warning("Настройка webhook не удалась, но сервер всё равно запущен")
+        
+        @app.post("/webhook/{token}")
+        async def bot_webhook(request: Request, token: str):
+            if token == BOT_TOKEN:
+                update = await request.json()
+                await dp.feed_update(bot, update)
+                return Response(status_code=200)
+            return Response(status_code=403)
         
         @app.get("/")
         async def root():
-            return {"status": "Bot is running"}
+            return {"status": "ok", "mode": "webhook"}
         
-        # Импортируем uvicorn для запуска FastAPI
-        import uvicorn
-        
-        # Запускаем сервер FastAPI
+        # Запускаем сервер FastAPI с учетом асинхронного startup-эвента
         port = int(os.environ.get("PORT", 8000))
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Сначала выполняем настройку webhook
+        loop.run_until_complete(setup())
+        
+        # Затем запускаем сервер
         uvicorn.run(app, host="0.0.0.0", port=port)
     else:
-        # Локально используем обычный polling
-        logger.info("Запуск в режиме polling...")
-        await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main()) 
+        # Локально используем asyncio для запуска в режиме polling
+        asyncio.run(main()) 
