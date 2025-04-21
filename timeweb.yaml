@@ -1,0 +1,14 @@
+# Конфигурация для Timeweb Cloud
+app:
+  name: rddm-bot
+  port: 8080
+  run_command: python bot.py
+  check_path: /
+  check_timeout: 60
+  env:
+    - key: PORT
+      value: "8080"
+    - key: PYTHONUNBUFFERED
+      value: "1"
+  features:
+    - python 

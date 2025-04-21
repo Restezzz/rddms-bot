@@ -546,16 +546,21 @@ if __name__ == "__main__":
     
     # Логируем параметры окружения
     is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
-    logger.info(f"Запуск на Railway: {is_railway}")
+    is_timeweb = "TWC_" in os.environ.get("HOSTNAME", "") or any("TIMEWEB" in key for key in os.environ.keys())
     
-    # Логируем все переменные окружения, связанные с Railway
-    logger.info("=== Railway переменные окружения ===")
+    if is_timeweb:
+        logger.info("Обнаружена среда Timeweb Cloud!")
+    
+    logger.info(f"Запуск на Railway: {is_railway}")
+    logger.info(f"Запуск на Timeweb: {is_timeweb}")
+    
+    # Логируем окружение для отладки
+    logger.info("=== Переменные окружения ===")
     for key, value in sorted(os.environ.items()):
-        if "RAILWAY" in key or "URL" in key or "DOMAIN" in key or "HOST" in key:
-            # Скрываем токены и ключи
-            if any(secret in key.lower() for secret in ["token", "key", "secret", "password", "auth"]):
-                value = value[:10] + "..." if value and len(value) > 10 else value
-            logger.info(f"{key}: {value}")
+        # Скрываем токены и ключи
+        if any(secret in key.lower() for secret in ["token", "key", "secret", "password", "auth"]):
+            value = value[:10] + "..." if value and len(value) > 10 else value
+        logger.info(f"{key}: {value}")
     logger.info("===================================")
     
     # Все запускаем в одном асинхронном цикле
@@ -580,59 +585,61 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Ошибка при проверке API: {e}")
         
-        # Запускаем HTTP сервер если на Railway
-        if is_railway:
-            import aiohttp
-            from aiohttp import web
-            
-            # Создаем простой HTTP-сервер для ответа на healthcheck
-            app = web.Application()
-            
-            # Middleware для логирования запросов
-            @web.middleware
-            async def logging_middleware(request, handler):
-                start_time = asyncio.get_event_loop().time()
-                try:
-                    response = await handler(request)
-                    end_time = asyncio.get_event_loop().time()
-                    duration = end_time - start_time
-                    # Логируем только запросы к корню
-                    if request.path == "/":
-                        logger.info(f"HTTP Request: {request.method} {request.path} - {response.status} ({duration:.4f}s)")
-                    return response
-                except Exception as e:
-                    logger.error(f"HTTP Error: {request.method} {request.path} - {e}")
-                    raise
-            
-            # Применяем middleware
-            app.middlewares.append(logging_middleware)
-            
-            # Глобальная переменная для отслеживания состояния бота
-            bot_started_at = time.time()
-            polling_active = True
-            
-            async def health_handler(request):
-                uptime = int(time.time() - bot_started_at)
-                return web.json_response({
-                    "status": "ok", 
-                    "mode": "polling", 
-                    "timestamp": int(time.time()),
-                    "uptime": uptime,
-                    "polling_active": polling_active,
-                    "handlers_count": len(dp.message.handlers)
-                })
-            
-            app.router.add_get('/', health_handler)
-            
-            # Получаем порт из переменной окружения
-            port = int(os.environ.get("PORT", 8080))
-            
-            # Запускаем HTTP сервер в асинхронном режиме без блокировки
-            runner = web.AppRunner(app)
-            await runner.setup()
-            site = web.TCPSite(runner, '0.0.0.0', port)
-            await site.start()
-            logger.info(f"HTTP сервер запущен на порту {port}")
+        # Запускаем HTTP сервер для healthcheck и для Timeweb Cloud
+        # Используем стандартный порт 8080, который нужен для Timeweb
+        import aiohttp
+        from aiohttp import web
+        
+        # Создаем простой HTTP-сервер для ответа на healthcheck
+        app = web.Application()
+        
+        # Middleware для логирования запросов
+        @web.middleware
+        async def logging_middleware(request, handler):
+            start_time = asyncio.get_event_loop().time()
+            try:
+                response = await handler(request)
+                end_time = asyncio.get_event_loop().time()
+                duration = end_time - start_time
+                # Логируем только запросы к корню
+                if request.path == "/":
+                    logger.info(f"HTTP Request: {request.method} {request.path} - {response.status} ({duration:.4f}s)")
+                return response
+            except Exception as e:
+                logger.error(f"HTTP Error: {request.method} {request.path} - {e}")
+                raise
+        
+        # Применяем middleware
+        app.middlewares.append(logging_middleware)
+        
+        # Глобальная переменная для отслеживания состояния бота
+        bot_started_at = time.time()
+        polling_active = True
+        
+        async def health_handler(request):
+            uptime = int(time.time() - bot_started_at)
+            return web.json_response({
+                "status": "ok", 
+                "mode": "polling", 
+                "timestamp": int(time.time()),
+                "uptime": uptime,
+                "polling_active": polling_active,
+                "handlers_count": len(dp.message.handlers)
+            })
+        
+        app.router.add_get('/', health_handler)
+        
+        # Получаем порт из переменной окружения
+        # Важно: на Timeweb Cloud порт должен быть 8080
+        port = int(os.environ.get("PORT", 8080))
+        logger.info(f"HTTP сервер будет запущен на порту {port}")
+        
+        # Запускаем HTTP сервер в асинхронном режиме без блокировки
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"HTTP сервер запущен на порту {port}")
         
         # Запускаем бота
         logger.info("Запуск бота в режиме polling...")
