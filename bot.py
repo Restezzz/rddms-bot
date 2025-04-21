@@ -36,6 +36,33 @@ async def debug_echo(message: Message):
     except Exception as e:
         logger.error(f"DEBUG: Ошибка при отправке ответа: {e}")
 
+# Добавляем явный обработчик команды /start для отладки
+@dp.message(Command("start"))
+async def cmd_start_debug(message: Message):
+    logger.info(f"DEBUG: Получена команда /start от {message.from_user.id}")
+    try:
+        await message.answer("Привет! Я бот и я работаю в режиме отладки.")
+        logger.info(f"DEBUG: Отправлен ответ на команду /start пользователю {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"DEBUG: Ошибка при отправке ответа на /start: {e}")
+
+# Добавляем обработчик команды /debug
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    logger.info(f"DEBUG: Получена команда /debug от {message.from_user.id}")
+    try:
+        debug_info = "Диагностическая информация:\n"
+        debug_info += f"- Бот запущен и работает\n"
+        debug_info += f"- Telegram ID: {message.from_user.id}\n"
+        debug_info += f"- Имя пользователя: {message.from_user.username}\n"
+        debug_info += f"- Диспетчер: обработчиков сообщений: {len(dp.message.handlers)}\n"
+        debug_info += f"- Router включен: {router in dp.routers}\n"
+        
+        await message.answer(debug_info)
+        logger.info(f"DEBUG: Отправлена отладочная информация пользователю {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"DEBUG: Ошибка при отправке отладочной информации: {e}")
+
 # Инициализация менеджера сессий и клиента LLM
 session_manager = SessionManager()
 llm_client = LLMClient()
@@ -480,6 +507,10 @@ async def process_message(message: Message):
                 "Пожалуйста, попробуйте еще раз с более кратким описанием изменений."
             )
 
+# Глобальные переменные для webhook режима - не используются в режиме polling
+# webhook_path = None
+# app = None
+
 async def test_api_connection():
     """Проверяет подключение к API при запуске"""
     try:
@@ -506,180 +537,36 @@ async def test_api_connection():
         logger.error(f"Тестовый запрос к API не удался: {e}")
         return False
 
-# Глобальные переменные для webhook режима
-webhook_path = None
-app = None
-
-async def setup():
-    """Инициализация бота и настройка webhook"""
-    try:
-        # Определяем, запущены ли мы на Railway
-        is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
-        
-        # Проверяем, зарегистрированы ли обработчики
-        handlers_count = len(dp.handlers.values())
-        logger.info(f"Зарегистрировано обработчиков в диспетчере: {handlers_count}")
-        
-        # Логирование всех зарегистрированных обработчиков
-        for router_key, router in dp.routers.items():
-            router_handlers = len(router.handlers) if hasattr(router, "handlers") else 0
-            logger.info(f"Роутер {router_key}: {router_handlers} обработчиков")
-        
-        # Добавляем тестовый обработчик для проверки
-        @dp.message()
-        async def echo_handler(message: Message):
-            logger.info(f"Получено сообщение: {message.text}")
-            try:
-                await message.answer("Тестовый ответ на сообщение")
-                logger.info("Отправлен тестовый ответ")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке ответа: {e}")
-        
-        # Принудительно удаляем webhook перед запуском
-        logger.info("Удаляем webhook...")
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            
-            # Делаем двойную проверку, что webhook точно удален
-            webhook_info = await bot.get_webhook_info()
-            if webhook_info.url:
-                logger.warning(f"Webhook всё ещё активен: {webhook_info.url}. Пробуем удалить снова...")
-                await bot.delete_webhook(drop_pending_updates=True)
-        except Exception as e:
-            logger.error(f"Ошибка при удалении webhook: {e}")
-        
-        # Проверяем соединение с API
-        try:
-            api_status = await test_api_connection()
-            if not api_status:
-                logger.warning("API недоступен, бот будет работать с заглушками")
-        except Exception as e:
-            logger.error(f"Ошибка при проверке API: {e}")
-        
-        if is_railway:
-            # На Railway запускаем бота в режиме webhook
-            logger.info("Запуск на Railway, используем webhook...")
-            
-            try:
-                # Получаем URL для webhook
-                # Проверяем все возможные источники домена Railway
-                railway_domain_vars = [
-                    "RAILWAY_PUBLIC_DOMAIN",
-                    "RAILWAY_STATIC_URL",
-                    "RAILWAY_DOMAIN",
-                    "RAILWAY_SERVICE_NAME"
-                ]
-                
-                webhook_host = None
-                
-                # Проверяем переменные среды Railway
-                for var in railway_domain_vars:
-                    if os.environ.get(var):
-                        value = os.environ.get(var)
-                        # Если это просто имя сервиса без домена, добавляем домен Railway
-                        if not value.startswith("http") and "." not in value:
-                            value = f"{value}.up.railway.app"
-                        
-                        webhook_host = value if value.startswith("http") else f"https://{value}"
-                        logger.info(f"Использую {var} для webhook: {webhook_host}")
-                        break
-                
-                # Используем имя сервиса для создания стандартного URL Railway
-                if not webhook_host and os.environ.get("RAILWAY_SERVICE_NAME"):
-                    service_name = os.environ.get("RAILWAY_SERVICE_NAME")
-                    # Шаблон URL для Railway: https://имя-сервиса.up.railway.app
-                    webhook_host = f"https://{service_name}.up.railway.app"
-                    logger.info(f"Использую стандартный шаблон Railway по имени сервиса: {webhook_host}")
-                
-                # Используем проектное имя для создания стандартного URL Railway
-                if not webhook_host and os.environ.get("RAILWAY_PROJECT_NAME"):
-                    project_name = os.environ.get("RAILWAY_PROJECT_NAME")
-                    # Шаблон URL для Railway по имени проекта
-                    webhook_host = f"https://{project_name}.up.railway.app"
-                    logger.info(f"Использую стандартный шаблон Railway по имени проекта: {webhook_host}")
-                
-                # Смотрим статические переменные Railway PUBLIC_URL
-                if not webhook_host and os.environ.get("PUBLIC_URL"):
-                    webhook_host = os.environ.get("PUBLIC_URL")
-                    logger.info(f"Использую PUBLIC_URL: {webhook_host}")
-                
-                # Если всё еще нет URL, используем имя хоста плюс порт
-                if not webhook_host:
-                    import socket
-                    try:
-                        hostname = socket.gethostname()
-                        # Не добавляем порт в webhook URL, так как Telegram принимает только порты 80, 88, 443 или 8443
-                        webhook_host = f"https://{hostname}"
-                        logger.info(f"Использую hostname: {webhook_host}")
-                    except Exception as e:
-                        logger.error(f"Ошибка при получении hostname: {e}")
-                        # Последний вариант - использовать фиксированный URL
-                        webhook_host = "https://rddm-bot.up.railway.app"
-                        logger.warning(f"Использую фиксированный URL: {webhook_host}")
-                
-                # Убедимся, что URL не содержит нестандартный порт
-                if ":" in webhook_host and any(p in webhook_host for p in ["8080", "8000", "3000"]):
-                    # Удаляем порт из URL
-                    webhook_host = webhook_host.split(":")[0] + ("" if webhook_host.startswith("https") else ":443")
-                    logger.info(f"Удален нестандартный порт из URL: {webhook_host}")
-                
-                # Проверяем, начинается ли URL с протокола
-                if not webhook_host.startswith("http"):
-                    webhook_host = "https://" + webhook_host
-                    logger.info(f"Добавлен протокол в URL: {webhook_host}")
-                
-                global webhook_path
-                webhook_path = f"/webhook/{BOT_TOKEN}"
-                webhook_url = f"{webhook_host}{webhook_path}"
-                
-                # Настраиваем webhook
-                logger.info(f"Устанавливаю webhook на {webhook_url}")
-                
-                # Сначала проверим, доступен ли домен
-                try:
-                    import socket
-                    # Извлекаем домен из URL
-                    domain = webhook_host.replace("https://", "").replace("http://", "").split("/")[0]
-                    logger.info(f"Проверяю доступность домена {domain}...")
-                    
-                    # Пытаемся разрешить домен
-                    socket.gethostbyname(domain)
-                    logger.info(f"Домен {domain} успешно разрешен!")
-                except Exception as e:
-                    logger.error(f"Домен {domain} не разрешается: {e}")
-                    # Если домен не разрешается, пробуем альтернативные варианты
-                    webhook_host = "https://refreshing-commitment.up.railway.app"
-                    webhook_url = f"{webhook_host}{webhook_path}"
-                    logger.warning(f"Использую хардкодированный URL Railway из проектного имени: {webhook_host}")
-                
-                try:
-                    await bot.set_webhook(url=webhook_url)
-                    logger.info("Webhook успешно установлен!")
-                except Exception as e:
-                    # Не останавливаем работу бота, если webhook не установился
-                    logger.error(f"Ошибка при установке webhook: {e}")
-                    logger.warning("Продолжаем работу бота без webhook. Это может повлиять на работу с Telegram, но сервер будет работать.")
-            except Exception as e:
-                logger.error(f"Ошибка при установке webhook: {e}")
-            
-            # Возвращаем True для webhook режима
-            return True
-        
-        # Для локального режима - False
-        return False
-    except Exception as e:
-        logger.error(f"Общая ошибка в setup(): {e}")
-        # Даже при ошибке возвращаем True, чтобы не блокировать запуск
-        return True
-
 async def main():
     """Точка входа для запуска бота в режиме polling"""
     # Удаляем webhook перед запуском
+    logger.info("Удаляем webhook...")
     await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Проверяем соединение с API
+    try:
+        api_status = await test_api_connection()
+        if api_status:
+            logger.info("API доступен и работает")
+        else:
+            logger.warning("API недоступен, бот будет работать с заглушками")
+    except Exception as e:
+        logger.error(f"Ошибка при проверке API: {e}")
+    
+    # Выводим информацию о зарегистрированных обработчиках
+    router_info = "Зарегистрированные обработчики:\n"
+    for r in dp.message.handlers:
+        router_info += f"- Обработчик сообщений: {r}\n"
+    logger.info(router_info)
     
     # Запускаем бота
     logger.info("Запуск в режиме polling...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Ошибка при запуске polling: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     # Устанавливаем уровень логирования, чтобы видеть все сообщения
@@ -701,77 +588,25 @@ if __name__ == "__main__":
             logger.info(f"{key}: {value}")
     logger.info("===================================")
     
-    # Проверяем переменную окружения для выбора режима
-    force_polling = os.environ.get("FORCE_POLLING", "false").lower() == "true"
-    if force_polling:
-        logger.info("Режим FORCE_POLLING активирован! Запуск в режиме polling вместо webhook.")
+    # ВСЕГДА ИСПОЛЬЗУЕМ POLLING РЕЖИМ
+    logger.info("ЗАПУСК БОТА В РЕЖИМЕ POLLING...")
+    
+    # Принудительно удаляем webhook
+    try:
+        async def delete_webhook():
+            logger.info("Удаляю webhook...")
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Webhook удален")
+        
+        asyncio.run(delete_webhook())
+    except Exception as e:
+        logger.error(f"Ошибка удаления webhook: {e}")
+    
+    # Запускаем в режиме polling
+    logger.info("Запуск диспетчера в режиме polling")
+    try:
         asyncio.run(main())
-    elif is_railway:
-        # Используем FastAPI для запуска в webhook режиме
-        logger.info("Инициализация FastAPI для webhook режима")
-        from fastapi import FastAPI, Request, Response
-        from fastapi.middleware.cors import CORSMiddleware
-        import uvicorn
-        
-        app = FastAPI()
-        
-        # Настройка CORS
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-        
-        # Объявляем healthcheck эндпоинт первым делом
-        @app.get("/")
-        async def root():
-            return {"status": "ok", "mode": "webhook"}
-        
-        @app.post("/webhook/{token}")
-        async def bot_webhook(request: Request, token: str):
-            logger.info(f"Получен webhook запрос, токен: {token[:5]}...")
-            
-            if token == BOT_TOKEN:
-                try:
-                    # Логируем тело запроса
-                    request_body = await request.json()
-                    logger.info(f"Webhook данные: {request_body}")
-                    
-                    # Отправляем данные в диспетчер
-                    await dp.feed_update(bot, request_body)
-                    logger.info("Данные успешно переданы в диспетчер")
-                    
-                    return Response(status_code=200)
-                except Exception as e:
-                    logger.error(f"Ошибка при обработке webhook запроса: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    return Response(status_code=500)
-            else:
-                logger.warning(f"Получен запрос с неверным токеном: {token[:5]}...")
-                return Response(status_code=403)
-        
-        # Выносим настройку webhook в отдельный процесс
-        @app.on_event("startup")
-        async def on_startup():
-            # Запускаем настройку webhook в фоне
-            import asyncio
-            asyncio.create_task(setup())
-            logger.info("Сервер запущен и готов обрабатывать запросы")
-        
-        # Запускаем сервер FastAPI
-        port = int(os.environ.get("PORT", 8000))
-        logger.info(f"Запуск FastAPI сервера на порту {port}")
-        
-        try:
-            logger.info("Запуск uvicorn...")
-            uvicorn.run(app, host="0.0.0.0", port=port)
-        except Exception as e:
-            logger.critical(f"Критическая ошибка при запуске сервера: {e}")
-            import traceback
-            logger.critical(f"Трейсбек: {traceback.format_exc()}")
-    else:
-        # Локально используем asyncio для запуска в режиме polling
-        asyncio.run(main()) 
+    except Exception as e:
+        logger.critical(f"Критическая ошибка при запуске бота: {e}")
+        import traceback
+        logger.critical(traceback.format_exc()) 
