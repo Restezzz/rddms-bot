@@ -26,6 +26,16 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
+# Добавляем глобальный обработчик для всех сообщений
+@dp.message()
+async def debug_echo(message: Message):
+    logger.info(f"DEBUG: Получено сообщение от {message.from_user.id}: {message.text if message.text else 'без текста'}")
+    try:
+        await message.answer("Я получил ваше сообщение и работаю! Это тестовый ответ.")
+        logger.info(f"DEBUG: Отправлен ответ пользователю {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"DEBUG: Ошибка при отправке ответа: {e}")
+
 # Инициализация менеджера сессий и клиента LLM
 session_manager = SessionManager()
 llm_client = LLMClient()
@@ -506,6 +516,25 @@ async def setup():
         # Определяем, запущены ли мы на Railway
         is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
         
+        # Проверяем, зарегистрированы ли обработчики
+        handlers_count = len(dp.handlers.values())
+        logger.info(f"Зарегистрировано обработчиков в диспетчере: {handlers_count}")
+        
+        # Логирование всех зарегистрированных обработчиков
+        for router_key, router in dp.routers.items():
+            router_handlers = len(router.handlers) if hasattr(router, "handlers") else 0
+            logger.info(f"Роутер {router_key}: {router_handlers} обработчиков")
+        
+        # Добавляем тестовый обработчик для проверки
+        @dp.message()
+        async def echo_handler(message: Message):
+            logger.info(f"Получено сообщение: {message.text}")
+            try:
+                await message.answer("Тестовый ответ на сообщение")
+                logger.info("Отправлен тестовый ответ")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке ответа: {e}")
+        
         # Принудительно удаляем webhook перед запуском
         logger.info("Удаляем webhook...")
         try:
@@ -672,7 +701,12 @@ if __name__ == "__main__":
             logger.info(f"{key}: {value}")
     logger.info("===================================")
     
-    if is_railway:
+    # Проверяем переменную окружения для выбора режима
+    force_polling = os.environ.get("FORCE_POLLING", "false").lower() == "true"
+    if force_polling:
+        logger.info("Режим FORCE_POLLING активирован! Запуск в режиме polling вместо webhook.")
+        asyncio.run(main())
+    elif is_railway:
         # Используем FastAPI для запуска в webhook режиме
         logger.info("Инициализация FastAPI для webhook режима")
         from fastapi import FastAPI, Request, Response
@@ -697,11 +731,27 @@ if __name__ == "__main__":
         
         @app.post("/webhook/{token}")
         async def bot_webhook(request: Request, token: str):
+            logger.info(f"Получен webhook запрос, токен: {token[:5]}...")
+            
             if token == BOT_TOKEN:
-                update = await request.json()
-                await dp.feed_update(bot, update)
-                return Response(status_code=200)
-            return Response(status_code=403)
+                try:
+                    # Логируем тело запроса
+                    request_body = await request.json()
+                    logger.info(f"Webhook данные: {request_body}")
+                    
+                    # Отправляем данные в диспетчер
+                    await dp.feed_update(bot, request_body)
+                    logger.info("Данные успешно переданы в диспетчер")
+                    
+                    return Response(status_code=200)
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке webhook запроса: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    return Response(status_code=500)
+            else:
+                logger.warning(f"Получен запрос с неверным токеном: {token[:5]}...")
+                return Response(status_code=403)
         
         # Выносим настройку webhook в отдельный процесс
         @app.on_event("startup")
