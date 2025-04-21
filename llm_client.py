@@ -2,7 +2,7 @@ import requests
 import asyncio
 import json
 import aiohttp
-from config import OPENROUTER_API_URL, OPENROUTER_API_KEY, OPENROUTER_MODEL
+from config import OPENROUTER_API_URLS, OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_HEADERS
 import logging
 from rddm_info import get_rddm_knowledge
 from session_manager import PostSize
@@ -11,17 +11,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class LLMClient:
-    def __init__(self, api_url=OPENROUTER_API_URL, api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL):
-        self.api_url = api_url
+    def __init__(self, api_urls=OPENROUTER_API_URLS, api_key=OPENROUTER_API_KEY, model=OPENROUTER_MODEL, headers=OPENROUTER_HEADERS):
+        self.api_urls = api_urls
         self.api_key = api_key
         self.model = model
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
+        self.headers = headers.copy()
+        self.headers.update({
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://rddm-bot.app",
-            "X-Title": "РДДМ Бот",
-            "OpenAI-Organization": "org-dummy"  # Некоторые API требуют это поле
-        }
+        })
     
     async def generate_from_template(self, template_post, topic, post_size=PostSize.LARGE, language="ru"):
         """Генерирует пост на основе шаблона и темы."""
@@ -255,11 +252,7 @@ class LLMClient:
     async def _send_request_async(self, system_prompt, user_prompt):
         """Асинхронно отправляет запрос к OpenRouter API."""
         # Альтернативные URL для API
-        api_urls = [
-            self.api_url,  # основной URL
-            "https://openrouter.ai/v1/chat/completions",  # альтернативный URL 1
-            "https://api.openrouter.ai/api/v1/chat/completions"  # альтернативный URL 2
-        ]
+        api_urls = self.api_urls
         
         for attempt, current_url in enumerate(api_urls, 1):
             try:
@@ -275,12 +268,7 @@ class LLMClient:
                 }
                 
                 # Обновленный набор заголовков
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                    "HTTP-Referer": "https://rddm-bot.app",
-                    "X-Title": "РДДМ Бот",
-                }
+                headers = self.headers.copy()
                 
                 logger.info(f"Попытка {attempt}/{len(api_urls)}: Отправка запроса к {current_url} для модели {self.model}")
                 

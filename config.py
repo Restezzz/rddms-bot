@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "7994914232:AAFlg-YfYKw9QQHY3jyZ22V14rXPwlGiq
 logger.info(f"Загружен токен бота: {BOT_TOKEN[:10]}...")
 
 # Настройки OpenRouter API
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 # Проверяем, что ключ не пустой и имеет правильный формат
 if not OPENROUTER_API_KEY or not OPENROUTER_API_KEY.startswith("sk-or-"):
     logger.error(f"Неверный формат API ключа OpenRouter: {OPENROUTER_API_KEY[:10]}...")
@@ -28,8 +28,19 @@ else:
     logger.info(f"Загружен API ключ OpenRouter: {OPENROUTER_API_KEY[:10]}...")
 
 # URL API может меняться
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-logger.info(f"Используем URL API: {OPENROUTER_API_URL}")
+OPENROUTER_API_URLS = [
+    "https://openrouter.ai/api/v1/chat/completions",
+    "https://api.openrouter.ai/api/v1/chat/completions", 
+    "https://openrouter.ai/v1/chat/completions"
+]
+logger.info(f"Основной URL API: {OPENROUTER_API_URLS[0]}")
+
+# Заголовки для OpenRouter API
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": "https://railway.app",
+    "X-Title": "RDDM Bot"
+}
 
 # Модель
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-4-maverick:free")

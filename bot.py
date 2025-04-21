@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramNetworkError, TelegramBadRequest
 import re
 import os
+import socket
 
 from config import BOT_TOKEN
 from session_manager import SessionManager, UserState, GenerationMode, PostSize
@@ -532,14 +533,31 @@ async def setup():
             
             try:
                 # Получаем URL для webhook
-                webhook_host = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", "https://your-app.up.railway.app"))
+                webhook_host = os.environ.get("RAILWAY_STATIC_URL") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+                
+                # Если не удалось получить URL из переменных окружения, используем динамическое определение
+                if not webhook_host:
+                    # Получаем URL из переменной RAILWAY_SERVICE_XXX_URL
+                    for key, value in os.environ.items():
+                        if key.startswith("RAILWAY_SERVICE_") and key.endswith("_URL"):
+                            webhook_host = value
+                            logger.info(f"Найден URL сервиса: {key}={webhook_host}")
+                            break
+                
+                # Если всё еще нет URL, используем имя хоста плюс порт
+                if not webhook_host:
+                    hostname = socket.gethostname()
+                    port = os.environ.get("PORT", 8000)
+                    webhook_host = f"https://{hostname}:{port}"
+                    logger.info(f"Использую hostname: {webhook_host}")
+                
                 global webhook_path
                 webhook_path = f"/webhook/{BOT_TOKEN}"
                 webhook_url = f"{webhook_host}{webhook_path}"
                 
                 # Настраиваем webhook
+                logger.info(f"Устанавливаю webhook на {webhook_url}")
                 await bot.set_webhook(url=webhook_url)
-                logger.info(f"Webhook установлен на {webhook_url}")
             except Exception as e:
                 logger.error(f"Ошибка при установке webhook: {e}")
             
