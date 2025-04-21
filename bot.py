@@ -9,6 +9,8 @@ import re
 import os
 import socket
 import json
+import time
+import aiohttp
 
 from config import BOT_TOKEN
 from session_manager import SessionManager, UserState, GenerationMode, PostSize
@@ -538,35 +540,6 @@ async def test_api_connection():
         logger.error(f"Тестовый запрос к API не удался: {e}")
         return False
 
-async def main():
-    """Точка входа для запуска бота в режиме polling"""
-    # НЕ удаляем webhook здесь, так как это уже сделано перед вызовом этой функции
-    
-    # Проверяем соединение с API
-    try:
-        api_status = await test_api_connection()
-        if api_status:
-            logger.info("API доступен и работает")
-        else:
-            logger.warning("API недоступен, бот будет работать с заглушками")
-    except Exception as e:
-        logger.error(f"Ошибка при проверке API: {e}")
-    
-    # Выводим информацию о зарегистрированных обработчиках
-    router_info = "Зарегистрированные обработчики:\n"
-    for r in dp.message.handlers:
-        router_info += f"- Обработчик сообщений: {r}\n"
-    logger.info(router_info)
-    
-    # Запускаем бота
-    logger.info("Запуск в режиме polling...")
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"Ошибка при запуске polling: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-
 if __name__ == "__main__":
     # Устанавливаем уровень логирования, чтобы видеть все сообщения
     logging.basicConfig(level=logging.INFO, 
@@ -587,65 +560,115 @@ if __name__ == "__main__":
             logger.info(f"{key}: {value}")
     logger.info("===================================")
     
-    # Если запущено на Railway, запускаем HTTP-сервер для healthcheck
-    if is_railway:
-        import threading
-        import http.server
-        import socketserver
-        
-        # Создаем простой HTTP-сервер для ответа на healthcheck
-        class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "ok", "mode": "polling"}).encode())
-                # Логируем только обращения к корневому пути
-                if self.path == "/":
-                    logger.info(f"Обработан healthcheck запрос: {self.path}")
-                
-            # Отключаем логирование запросов
-            def log_message(self, format, *args):
-                # Логируем только ошибки 4xx и 5xx
-                if args[1].startswith('4') or args[1].startswith('5'):
-                    logger.warning(f"HTTP ошибка: {args[0]} {args[1]} {args[2]}")
-                return
-        
-        # Запускаем сервер в отдельном потоке
-        def run_http_server():
-            port = int(os.environ.get("PORT", 8080))
-            logger.info(f"Запуск HTTP сервера для healthcheck на порту {port}")
-            try:
-                with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
-                    logger.info(f"HTTP сервер запущен на порту {port}")
-                    httpd.serve_forever()
-            except Exception as e:
-                logger.error(f"Ошибка запуска HTTP сервера: {e}")
-        
-        # Запускаем HTTP сервер в отдельном потоке
-        http_thread = threading.Thread(target=run_http_server, daemon=True)
-        http_thread.start()
-        logger.info("HTTP сервер запущен в отдельном потоке")
+    # Все запускаем в одном асинхронном цикле
+    import asyncio
     
-    # ВСЕГДА ИСПОЛЬЗУЕМ POLLING РЕЖИМ
-    logger.info("ЗАПУСК БОТА В РЕЖИМЕ POLLING...")
-    
-    # Принудительно удаляем webhook
-    try:
-        async def delete_webhook():
-            logger.info("Удаляю webhook...")
+    async def run_all():
+        # Удаляем webhook
+        logger.info("Удаляю webhook...")
+        try:
             await bot.delete_webhook(drop_pending_updates=True)
             logger.info("Webhook удален")
+        except Exception as e:
+            logger.error(f"Ошибка удаления webhook: {e}")
         
-        asyncio.run(delete_webhook())
-    except Exception as e:
-        logger.error(f"Ошибка удаления webhook: {e}")
+        # Проверяем API
+        try:
+            api_status = await test_api_connection()
+            if api_status:
+                logger.info("API доступен и работает")
+            else:
+                logger.warning("API недоступен, бот будет работать с заглушками")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке API: {e}")
+        
+        # Запускаем HTTP сервер если на Railway
+        if is_railway:
+            import aiohttp
+            from aiohttp import web
+            
+            # Создаем простой HTTP-сервер для ответа на healthcheck
+            app = web.Application()
+            
+            # Middleware для логирования запросов
+            @web.middleware
+            async def logging_middleware(request, handler):
+                start_time = asyncio.get_event_loop().time()
+                try:
+                    response = await handler(request)
+                    end_time = asyncio.get_event_loop().time()
+                    duration = end_time - start_time
+                    # Логируем только запросы к корню
+                    if request.path == "/":
+                        logger.info(f"HTTP Request: {request.method} {request.path} - {response.status} ({duration:.4f}s)")
+                    return response
+                except Exception as e:
+                    logger.error(f"HTTP Error: {request.method} {request.path} - {e}")
+                    raise
+            
+            # Применяем middleware
+            app.middlewares.append(logging_middleware)
+            
+            # Глобальная переменная для отслеживания состояния бота
+            bot_started_at = time.time()
+            polling_active = True
+            
+            async def health_handler(request):
+                uptime = int(time.time() - bot_started_at)
+                return web.json_response({
+                    "status": "ok", 
+                    "mode": "polling", 
+                    "timestamp": int(time.time()),
+                    "uptime": uptime,
+                    "polling_active": polling_active,
+                    "handlers_count": len(dp.message.handlers)
+                })
+            
+            app.router.add_get('/', health_handler)
+            
+            # Получаем порт из переменной окружения
+            port = int(os.environ.get("PORT", 8080))
+            
+            # Запускаем HTTP сервер в асинхронном режиме без блокировки
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            logger.info(f"HTTP сервер запущен на порту {port}")
+        
+        # Запускаем бота
+        logger.info("Запуск бота в режиме polling...")
+        
+        # Выводим информацию о зарегистрированных обработчиках
+        router_info = "Зарегистрированные обработчики:\n"
+        for r in dp.message.handlers:
+            router_info += f"- Обработчик сообщений: {r}\n"
+        logger.info(router_info)
+        
+        # Настраиваем обработку ошибок для диспетчера
+        @dp.errors()
+        async def error_handler(exception):
+            logger.error(f"Ошибка при обработке обновления: {exception}")
+            return True  # Продолжаем обработку других обновлений
+        
+        try:
+            # Запускаем с автоматическим перезапуском при ошибках сети
+            while True:
+                try:
+                    logger.info("Запуск polling...")
+                    await dp.start_polling(bot)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.error(f"Сетевая ошибка при polling: {e}, перезапуск через 5 секунд...")
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"Критическая ошибка при polling: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    break  # Выходим из цикла при критических ошибках
+        except Exception as e:
+            logger.error(f"Ошибка при запуске polling: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
-    # Запускаем в режиме polling
-    logger.info("Запуск диспетчера в режиме polling")
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.critical(f"Критическая ошибка при запуске бота: {e}")
-        import traceback
-        logger.critical(traceback.format_exc()) 
+    # Запускаем все в одном цикле
+    asyncio.run(run_all()) 
