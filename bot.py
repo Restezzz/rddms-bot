@@ -236,6 +236,9 @@ def format_to_html(text):
     
     return html_text
 
+# Глобальный флаг для предотвращения двойной отправки
+POST_ALREADY_SENT = {}
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """Обработчик команды /start - начало новой сессии"""
@@ -347,17 +350,24 @@ async def process_size_selection(callback_query: CallbackQuery):
         
         # Отправляем результат
         await status_message.edit_text("✅ Генерация завершена!")
+        
+        # Устанавливаем флаг, что сообщение ещё не отправлялось
+        POST_ALREADY_SENT[user_id] = False
+        
         try:
+            # Попытка отправить с HTML форматированием
             html_text = format_to_html(generated_post)
             sent_message = await callback_query.message.answer(html_text, parse_mode="HTML")
             # Запоминаем ID сообщения с постом
             session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
-        except TelegramBadRequest as e:
-            logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-            # Если возникла ошибка, отправляем без форматирования
-            sent_message = await callback_query.message.answer(generated_post)
-            # Запоминаем ID сообщения с постом
-            session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
+            # Помечаем что сообщение отправлено
+            POST_ALREADY_SENT[user_id] = True
+        except Exception as e:
+            # Только если HTML отправка не удалась, пробуем обычный текст
+            logger.error(f"Ошибка при отправке HTML: {e}")
+            if not POST_ALREADY_SENT.get(user_id, False):
+                sent_message = await callback_query.message.answer(generated_post)
+                session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
         
         # Создаем инлайн-кнопки для действий с постом
         actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -414,18 +424,24 @@ async def cmd_change(message: Message, user_id: int):
     
     session_manager.update_session(user_id, chat_id=message.chat.id)
     
+    # Устанавливаем флаг, что сообщение ещё не отправлялось
+    POST_ALREADY_SENT[user_id] = False
+    
     # Показываем текущий пост и запрашиваем изменения
     try:
         html_text = format_to_html(session.current_post)
         post_message = await message.answer(f"Текущий пост:\n\n{html_text}", parse_mode="HTML")
         # Сохраняем ID сообщения с текущим постом
         session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
-    except TelegramBadRequest as e:
+        # Помечаем что сообщение отправлено
+        POST_ALREADY_SENT[user_id] = True
+    except Exception as e:
         logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-        # Если ошибка, отправляем без форматирования
-        post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
-        # Сохраняем ID сообщения с текущим постом
-        session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
+        # Только если HTML отправка не удалась, пробуем обычный текст
+        if not POST_ALREADY_SENT.get(user_id, False):
+            post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
+            # Сохраняем ID сообщения с текущим постом
+            session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
     
     await message.answer("Пожалуйста, укажите, какие изменения нужно внести.")
 
@@ -490,17 +506,24 @@ async def process_message(message: Message):
             
             # Сообщаем об успешном изменении и показываем результат
             await status_message.edit_text("✅ Пост успешно изменен!")
+            
+            # Устанавливаем флаг, что сообщение ещё не отправлялось
+            POST_ALREADY_SENT[user_id] = False
+            
             try:
                 html_text = format_to_html(modified_post)
                 sent_message = await message.answer(html_text, parse_mode="HTML")
                 # Запоминаем ID сообщения с постом
                 session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
-            except TelegramBadRequest as e:
+                # Помечаем что сообщение отправлено
+                POST_ALREADY_SENT[user_id] = True
+            except Exception as e:
                 logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-                # Если возникла ошибка, отправляем без форматирования
-                sent_message = await message.answer(modified_post)
-                # Запоминаем ID сообщения с постом
-                session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
+                # Только если HTML отправка не удалась, пробуем обычный текст
+                if not POST_ALREADY_SENT.get(user_id, False):
+                    sent_message = await message.answer(modified_post)
+                    # Запоминаем ID сообщения с постом
+                    session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
             
             # Создаем инлайн-кнопки для дальнейших действий
             actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
