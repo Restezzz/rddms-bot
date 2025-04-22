@@ -17,15 +17,15 @@ else:
 
 # Токен Telegram бота
 BOT_TOKEN = os.getenv("BOT_TOKEN", "7782469339:AAEEpEHAkB6DN3SAD6LPbAL1D_rg6EdfZV4")
-logger.info(f"Загружен токен бота: {BOT_TOKEN[:12]}...")
+logger.info(f"Загружен токен бота: {BOT_TOKEN[:13]}...")
 
 # Настройки OpenRouter API
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
 # Проверяем, что ключ не пустой и имеет правильный формат
 if not OPENROUTER_API_KEY or not OPENROUTER_API_KEY.startswith("sk-or-"):
-    logger.error(f"Неверный формат API ключа OpenRouter: {OPENROUTER_API_KEY[:12]}...")
+    logger.error(f"Неверный формат API ключа OpenRouter: {OPENROUTER_API_KEY[:13]}...")
 else:
-    logger.info(f"Загружен API ключ OpenRouter: {OPENROUTER_API_KEY[:10]}...")
+    logger.info(f"Загружен API ключ OpenRouter: {OPENROUTER_API_KEY[:13]}...")
 
 # URL API может меняться
 OPENROUTER_API_URLS = [
