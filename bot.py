@@ -349,11 +349,15 @@ async def process_size_selection(callback_query: CallbackQuery):
         await status_message.edit_text("✅ Генерация завершена!")
         try:
             html_text = format_to_html(generated_post)
-            await callback_query.message.answer(html_text, parse_mode="HTML")
+            sent_message = await callback_query.message.answer(html_text, parse_mode="HTML")
+            # Запоминаем ID сообщения с постом
+            session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
         except TelegramBadRequest as e:
             logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
             # Если возникла ошибка, отправляем без форматирования
-        await callback_query.message.answer(generated_post)
+            sent_message = await callback_query.message.answer(generated_post)
+            # Запоминаем ID сообщения с постом
+            session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
         
         # Создаем инлайн-кнопки для действий с постом
         actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -414,12 +418,14 @@ async def cmd_change(message: Message, user_id: int):
     try:
         html_text = format_to_html(session.current_post)
         post_message = await message.answer(f"Текущий пост:\n\n{html_text}", parse_mode="HTML")
+        # Сохраняем ID сообщения с текущим постом
+        session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
     except TelegramBadRequest as e:
         logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-    post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
-    
-    # Сохраняем ID сообщения с текущим постом
-    session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
+        # Если ошибка, отправляем без форматирования
+        post_message = await message.answer(f"Текущий пост:\n\n{session.current_post}")
+        # Сохраняем ID сообщения с текущим постом
+        session_manager.update_session(user_id, current_post_message_id=post_message.message_id)
     
     await message.answer("Пожалуйста, укажите, какие изменения нужно внести.")
 
@@ -486,10 +492,15 @@ async def process_message(message: Message):
             await status_message.edit_text("✅ Пост успешно изменен!")
             try:
                 html_text = format_to_html(modified_post)
-                await message.answer(html_text, parse_mode="HTML")
+                sent_message = await message.answer(html_text, parse_mode="HTML")
+                # Запоминаем ID сообщения с постом
+                session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
             except TelegramBadRequest as e:
                 logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-            await message.answer(modified_post)
+                # Если возникла ошибка, отправляем без форматирования
+                sent_message = await message.answer(modified_post)
+                # Запоминаем ID сообщения с постом
+                session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
             
             # Создаем инлайн-кнопки для дальнейших действий
             actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
