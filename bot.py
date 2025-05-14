@@ -330,20 +330,43 @@ async def process_size_selection(callback_query: CallbackQuery):
     status_message = await callback_query.message.edit_text("Понял! Генерирую ваш пост...")
     
     try:
+        # Получаем тему и шаблон из сессии
+        topic = session.last_topic or session.topic
+        template_post = session.template_post
+        
+        # Логируем информацию о генерации
+        logger.info(f"Генерация поста для пользователя {user_id}. Тема: {topic}, Размер: {post_size}")
+        
         # Использование разных методов в зависимости от режима
-        if session.mode == GenerationMode.TEMPLATE:
-            generated_post = await llm_client.generate_from_template(
-                template_post=session.template_post, 
-                topic=session.topic,
-                post_size=post_size,
-                language=session.language
-            )
+        if session.mode == GenerationMode.TEMPLATE and template_post:
+            try:
+                generated_post = await asyncio.wait_for(
+                    llm_client.generate_from_template(
+                        template_post=template_post, 
+                        topic=topic,
+                        post_size=post_size,
+                        language=session.language
+                    ),
+                    timeout=45  # 45 секунд таймаут
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Таймаут при генерации поста по шаблону для {user_id}")
+                await status_message.edit_text("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз или выберите другой размер поста.")
+                return
         else:
-            generated_post = await llm_client.generate_without_template(
-                topic=session.topic,
-                post_size=post_size,
-                language=session.language
-            )
+            try:
+                generated_post = await asyncio.wait_for(
+                    llm_client.generate_without_template(
+                        topic=topic,
+                        post_size=post_size,
+                        language=session.language
+                    ),
+                    timeout=45  # 45 секунд таймаут
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Таймаут при генерации поста без шаблона для {user_id}")
+                await status_message.edit_text("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз или выберите другой размер поста.")
+                return
         
         # Сохраняем сгенерированный пост
         session_manager.update_session(user_id, current_post=generated_post)
@@ -465,94 +488,41 @@ async def process_message(message: Message):
     
     # Проверяем текущий этап сессии
     if user_state.stage == "wait_for_topic":
-        try:
-            topic = message.text.strip()
-            
-            # Создаем клавиатуру для действий с постом
-            post_actions = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Подтвердить ✅", callback_data="action:confirm")],
-                [InlineKeyboardButton(text="Изменить ✏️", callback_data="action:edit")],
-                [InlineKeyboardButton(text="Новый пост 🔄", callback_data="action:new")]
-            ])
-            
-            # Отправляем сообщение о генерации
-            processing_msg = await message.answer("⏳ Генерирую пост по вашей теме... Это может занять до 30 секунд.")
-            
-            # Определяем, какой режим генерации использовать
-            try:
-                if user_state.post_text and user_state.mode == GenerationMode.TEMPLATE:
-                    # Используем текущий пост как шаблон для нового
-                    logger.info(f"Генерация поста по шаблону для пользователя {user_id}")
-                    
-                    # Устанавливаем таймаут для запроса
-                    try:
-                        post_text = await asyncio.wait_for(
-                            llm_client.generate_from_template(
-                                template_post=user_state.post_text, 
-                                topic=topic,
-                                post_size=user_state.post_size
-                            ),
-                            timeout=45  # 45 секунд на всю генерацию
-                        )
-                    except asyncio.TimeoutError:
-                        logger.error(f"Таймаут при генерации поста по шаблону для {user_id}")
-                        await processing_msg.delete()
-                        await message.answer("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз или выберите другую тему.")
-                        return
-                else:
-                    # Генерируем без шаблона
-                    logger.info(f"Генерация поста без шаблона для пользователя {user_id}")
-                    
-                    # Устанавливаем таймаут для запроса
-                    try:
-                        post_text = await asyncio.wait_for(
-                            llm_client.generate_without_template(
-                                topic=topic,
-                                post_size=user_state.post_size
-                            ),
-                            timeout=45  # 45 секунд на всю генерацию
-                        )
-                    except asyncio.TimeoutError:
-                        logger.error(f"Таймаут при генерации поста без шаблона для {user_id}")
-                        await processing_msg.delete()
-                        await message.answer("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз или выберите другую тему.")
-                        return
-                
-                # Сохраняем сгенерированный пост в состоянии пользователя
-                user_state.post_text = post_text
-                user_state.last_topic = topic
-                session_manager.update_session(user_id, user_state)
-                
-                # Удаляем сообщение о генерации
-                await processing_msg.delete()
-                
-                # Отправляем сгенерированный пост
-                await message.answer(
-                    f"✅ Вот ваш пост на тему: {topic}\n\n{post_text}", 
-                    reply_markup=post_actions,
-                    parse_mode='HTML'
-                )
-                logger.info(f"Пост успешно сгенерирован для пользователя {user_id}")
-                
-            except Exception as e:
-                logger.error(f"Ошибка при генерации поста: {e}")
-                await processing_msg.delete()
-                await message.answer(
-                    f"❌ Произошла ошибка при генерации поста: {str(e)}. Пожалуйста, попробуйте еще раз.",
-                    reply_markup=main_keyboard
-                )
-                # Сбрасываем сессию при ошибке
-                session_manager.reset_session(user_id)
-                
-        except Exception as e:
-            logger.error(f"Ошибка при обработке темы: {e}")
-            await message.answer(
-                "❌ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.",
-                reply_markup=main_keyboard
-            )
-            session_manager.reset_session(user_id)
-            
-    elif user_state.stage == "wait_for_edit":
+        # Получаем тему от пользователя
+        topic = message.text.strip()
+        
+        # Сохраняем тему
+        user_state.last_topic = topic
+        session_manager.update_session(user_id, topic=topic)
+        
+        # Логируем выбранную тему
+        logger.info(f"Получена тема от пользователя {user_id}: {topic}")
+        
+        # Отправляем запрос на выбор размера поста
+        await message.answer(
+            f"Выбрана тема: {topic}\nТеперь выберите размер поста:",
+            reply_markup=size_keyboard
+        )
+    
+    elif user_state.stage == "wait_for_template":
+        # Получаем шаблон от пользователя
+        template = message.text.strip()
+        
+        # Сохраняем шаблон
+        session_manager.update_session(user_id, template_post=template)
+        
+        # Логируем полученный шаблон
+        logger.info(f"Получен шаблон от пользователя {user_id}")
+        
+        # Запрашиваем тему
+        await message.answer(
+            "Шаблон сохранен. Теперь укажите тему или событие для генерации поста."
+        )
+        
+        # Обновляем стадию
+        session_manager.update_session(user_id, stage="wait_for_topic")
+        
+    elif user_state.stage == "wait_for_changes":
         try:
             edit_request = message.text.strip()
             
@@ -571,7 +541,7 @@ async def process_message(message: Message):
                 try:
                     edited_text = await asyncio.wait_for(
                         llm_client.modify_post(
-                            current_post=user_state.post_text,
+                            current_post=user_state.current_post,
                             modification_request=edit_request
                         ),
                         timeout=45  # 45 секунд на всё редактирование
@@ -583,8 +553,7 @@ async def process_message(message: Message):
                     return
                     
                 # Сохраняем отредактированный пост
-                user_state.post_text = edited_text
-                session_manager.update_session(user_id, user_state)
+                session_manager.update_session(user_id, current_post=edited_text)
                 
                 # Удаляем сообщение о редактировании
                 await processing_msg.delete()
