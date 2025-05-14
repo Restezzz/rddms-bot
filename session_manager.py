@@ -32,6 +32,14 @@ class UserState:
         # Размер поста
         self.post_size = PostSize.MEDIUM
         
+        # Дополнительные поля для генерации
+        self.topic = None  # Текущая тема
+        self.template_post = None  # Шаблон поста
+        self.current_post = None  # Текущий сгенерированный пост
+        self.language = "ru"  # Язык генерации
+        self.current_post_message_id = None  # ID сообщения с текущим постом
+        self.chat_id = None  # ID чата
+        
     def update(self, **kwargs):
         """Обновляет поля объекта по словарю с аргументами"""
         for key, value in kwargs.items():
@@ -43,7 +51,7 @@ class UserState:
 
 class UserSession(BaseModel):
     user_id: int
-    state: Optional[dict] = None  # Заменяем на dict для хранения сериализованного состояния
+    state: Optional[dict] = None
     mode: Optional[GenerationMode] = None
     template_post: Optional[str] = None
     topic: Optional[str] = None

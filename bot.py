@@ -323,6 +323,9 @@ async def process_size_selection(callback_query: CallbackQuery):
         stage="idle"  # Используем строковое значение
     )
     
+    # Сохраняем сессию в локальной переменной заново после обновления
+    session = session_manager.get_session(user_id)
+    
     # Важно: отвечаем на callback сразу, до начала генерации
     await callback_query.answer()
     
@@ -331,21 +334,23 @@ async def process_size_selection(callback_query: CallbackQuery):
     
     try:
         # Получаем тему и шаблон из сессии
-        topic = session.last_topic or session.topic
-        template_post = session.template_post
+        topic = session.last_topic
         
-        # Логируем информацию о генерации
+        if not topic:
+            await status_message.edit_text("❌ Не указана тема для генерации. Пожалуйста, начните сначала.")
+            return
+            
         logger.info(f"Генерация поста для пользователя {user_id}. Тема: {topic}, Размер: {post_size}")
         
         # Использование разных методов в зависимости от режима
-        if session.mode == GenerationMode.TEMPLATE and template_post:
+        if session.mode == GenerationMode.TEMPLATE and hasattr(session, 'template_post') and session.template_post:
             try:
                 generated_post = await asyncio.wait_for(
                     llm_client.generate_from_template(
-                        template_post=template_post, 
+                        template_post=session.template_post, 
                         topic=topic,
                         post_size=post_size,
-                        language=session.language
+                        language="ru"
                     ),
                     timeout=45  # 45 секунд таймаут
                 )
@@ -359,7 +364,7 @@ async def process_size_selection(callback_query: CallbackQuery):
                     llm_client.generate_without_template(
                         topic=topic,
                         post_size=post_size,
-                        language=session.language
+                        language="ru"
                     ),
                     timeout=45  # 45 секунд таймаут
                 )
@@ -406,7 +411,7 @@ async def process_size_selection(callback_query: CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка при генерации поста: {e}")
         await status_message.edit_text(
-            "❌ Произошла ошибка при генерации поста. Возможно, сервер нейросети перегружен. "
+            f"❌ Произошла ошибка при генерации поста: {str(e)}. "
             "Пожалуйста, попробуйте еще раз или выберите другой размер поста."
         )
 
