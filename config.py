@@ -29,7 +29,10 @@ else:
 
 # URL API может меняться
 OPENROUTER_API_URLS = [
-    "https://api.openrouter.ai/api/v1/chat/completions",  # Сначала другой поддомен
+    "https://188.114.98.224/api/v1/chat/completions",  # IP вместо api.openrouter.ai
+    "https://188.114.99.224/api/v1/chat/completions",  # Альтернативный IP
+    "https://openrouter.dev/api/v1/chat/completions",  # Новый поддомен
+    "https://api.openrouter.dev/api/v1/chat/completions",  # Новый API поддомен
     "https://openrouter.ai/api/v1/chat/completions", 
     "https://openrouter.ai/v1/chat/completions",
     "https://openrouter.ai/api/chat/completions",

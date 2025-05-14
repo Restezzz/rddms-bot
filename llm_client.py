@@ -84,7 +84,7 @@ class LLMClient:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         self.debug = debug
-        self.disable_ssl = disable_ssl
+        self.disable_ssl = True  # Всегда отключаем SSL-проверку
         
         # Семафор для ограничения одновременных запросов
         self.request_semaphore = asyncio.Semaphore(3)  # Максимум 3 одновременных запроса
@@ -150,6 +150,7 @@ class LLMClient:
             
             # Применяем ограничения по размеру
             return self._enforce_size_limits(generated_text, min_size, max_size)
+            
         except asyncio.TimeoutError:
             logger.error(f"Тайм-аут при генерации поста из шаблона по теме '{topic}'")
             return f"Извините, время ожидания истекло. Попробуйте ещё раз или выберите другую тему.\n\n#ДвижениеПервых59"
@@ -202,6 +203,7 @@ class LLMClient:
             
             # Применяем ограничения по размеру
             return self._enforce_size_limits(generated_text, min_size, max_size)
+            
         except asyncio.TimeoutError:
             logger.error(f"Тайм-аут при генерации поста без шаблона по теме '{topic}'")
             return f"Извините, время ожидания истекло. Попробуйте ещё раз или выберите другую тему.\n\n#ДвижениеПервых59"
@@ -244,6 +246,7 @@ class LLMClient:
             # Сохраняем примерно ту же длину
             current_length = len(current_post)
             return self._enforce_size_limits(generated_text, current_length * 0.8, current_length * 1.2)
+            
         except asyncio.TimeoutError:
             logger.error(f"Тайм-аут при модификации поста")
             return f"Извините, время ожидания истекло. Попробуйте ещё раз с другим запросом на изменение.\n\n{current_post}"
@@ -370,17 +373,17 @@ class LLMClient:
     
     async def _execute_request(self, system_prompt, user_prompt, request_id):
         """Выполняет фактический запрос к API с обработкой ошибок и сменой моделей/URL."""
-        # Альтернативные URL для API
-        api_urls = self.api_urls[:2]  # Используем только первые 2 URL для снижения нагрузки
+        # Используем все доступные URL для большей вероятности успеха
+        api_urls = self.api_urls.copy()
         
-        # Список моделей для попытки: только основная и одна альтернативная
-        models_to_try = [self.model, ALTERNATIVE_MODELS[0]]
+        # Список моделей для попытки
+        models_to_try = [self.model] + ALTERNATIVE_MODELS[:1]  # Берем только первую альтернативную модель
         
         for attempt, current_url in enumerate(api_urls, 1):
-            current_model = models_to_try[0]  # Начинаем с основной модели
+            current_model = models_to_try[0]  # Текущая модель для этой попытки
             
             try:
-                # Подготовка данных для запроса в формате OpenAI API
+                # Подготовка данных для запроса
                 payload = {
                     "model": current_model,
                     "messages": [
@@ -392,11 +395,10 @@ class LLMClient:
                 }
                 
                 headers = self.headers.copy()
-                
                 logger.info(f"Запрос {request_id}: попытка {attempt}/{len(api_urls)} к {current_url}, модель {current_model}")
                 
                 # Отключаем проверку SSL для отладки и решения проблем с сертификатами
-                connector = aiohttp.TCPConnector(ssl=False if self.disable_ssl else None, force_close=True)
+                connector = aiohttp.TCPConnector(ssl=False, force_close=True)
                 
                 # Настраиваем более жесткие тайм-ауты для разных этапов запроса
                 timeout = aiohttp.ClientTimeout(total=20, connect=5, sock_read=15)
@@ -408,55 +410,45 @@ class LLMClient:
                         headers=headers
                     ) as response:
                         status = response.status
-                        
-                        # Получаем ответ с таймаутом для чтения
                         raw_response = await asyncio.wait_for(response.text(), timeout=10)
                         
                         if status != 200:
-                            logger.error(f"Ошибка API (запрос {request_id}, попытка {attempt}): {status}")
-                            
-                            # Переключаемся на альтернативную модель при ошибке 
-                            if attempt < len(api_urls):
-                                # Для следующей попытки меняем модель
-                                models_to_try.reverse()
-                                continue
-                            
-                            # Фоллбэк ответ при всех ошибках
-                            return self._get_fallback_response(user_prompt)
+                            logger.error(f"Ошибка API (запрос {request_id}): статус {status}")
+                            # Переходим к следующей попытке
+                            raise Exception(f"API вернул статус {status}")
                         
-                        # Обрабатываем ответ
+                        # Если дошли сюда, то статус 200
                         try:
                             result = json.loads(raw_response)
                             
-                            # Извлекаем ответ из структуры OpenAI API
+                            # Проверяем наличие ответа в ожидаемом формате
                             if "choices" in result and len(result["choices"]) > 0:
                                 message = result["choices"][0]["message"]
                                 if message and "content" in message:
                                     logger.info(f"Запрос {request_id}: успешно получен ответ")
                                     return message["content"]
                             
+                            # Если дошли сюда - формат ответа неожиданный
                             logger.error(f"Запрос {request_id}: неожиданный формат JSON")
+                            raise Exception("Неожиданный формат ответа")
                             
                         except json.JSONDecodeError:
                             logger.error(f"Запрос {request_id}: ошибка декодирования JSON")
-                            
-                        # Если дошли сюда, значит что-то пошло не так с обработкой ответа
-                        if attempt < len(api_urls):
-                            models_to_try.reverse()  # Меняем модель для следующей попытки
-                            continue
+                            raise
             
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
                 logger.error(f"Запрос {request_id}: ошибка соединения: {e}")
-                
-                if attempt < len(api_urls):
-                    models_to_try.reverse()  # Меняем модель для следующей попытки
-                    continue
             
             except Exception as e:
-                logger.error(f"Запрос {request_id}: непредвиденная ошибка: {e}")
-                
-                if attempt < len(api_urls):
-                    continue
+                logger.error(f"Запрос {request_id}: ошибка: {e}")
+            
+            # Если попытка не удалась, пробуем другую модель и/или URL
+            if len(models_to_try) > 1:
+                # Меняем модель
+                models_to_try = models_to_try[1:] + models_to_try[:1]
+            elif attempt < len(api_urls):
+                # Переключаемся на следующий URL и сбрасываем модели
+                models_to_try = [self.model] + ALTERNATIVE_MODELS[:1]
         
         # Если все попытки не удались
         logger.error(f"Запрос {request_id}: все попытки запроса к API неудачны")
@@ -466,8 +458,10 @@ class LLMClient:
         """Возвращает заглушку при ошибках API."""
         logger.info("Использование заглушки из-за ошибок API")
         
-        # Простая заглушка без сетевых запросов
-        if "паспорт" in user_prompt.lower():
+        user_prompt_lower = user_prompt.lower()
+        
+        # Проверяем различные ключевые слова для выбора подходящей заглушки
+        if "паспорт" in user_prompt_lower:
             return """Сегодня состоялось торжественное вручение паспортов юным гражданам России! 
 
 В этот важный день ребята присоединились к программе «Мы – граждане России!», которая реализуется совместно с Министерством внутренних дел РФ.
@@ -478,7 +472,7 @@ class LLMClient:
 
 #МыГражданеРоссии #ПатриотыПервых #ДвижениеПервых59"""
         
-        elif "экология" in user_prompt.lower():
+        elif "экология" in user_prompt_lower:
             return """Друзья! Движение Первых приглашает всех на экологическую акцию по уборке городского парка!
 
 Вместе мы сделаем наш город чище и покажем, что забота о природе начинается с малого - с бережного отношения к окружающей среде вокруг нас.
@@ -487,7 +481,7 @@ class LLMClient:
 
 #ЭкологияПервых #ДвижениеПервых59"""
         
-        elif "спорт" in user_prompt.lower():
+        elif "спорт" in user_prompt_lower:
             return """Активный образ жизни - путь к успеху! 
 
 Сегодня участники "Движения Первых" провели открытую тренировку на свежем воздухе. Утренняя зарядка, пробежка и спортивные игры - отличный заряд энергии на весь день!
@@ -495,6 +489,15 @@ class LLMClient:
 Присоединяйтесь к нашим регулярным тренировкам каждую субботу в 10:00 в городском парке.
 
 #СпортЗОЖПервых #ДвижениеПервых59"""
+            
+        elif "коров" in user_prompt_lower:
+            return """Сегодня в рамках образовательной программы "Движения Первых" ребята посетили современную молочную ферму и узнали о новейших технологиях в сельском хозяйстве!
+
+Самое яркое впечатление произвели автоматические доильные аппараты, где коровы самостоятельно заходят в доильные боксы, когда чувствуют необходимость. Датчики и роботизированная система делают процесс доения комфортным как для животных, так и для фермеров.
+
+Такие экскурсии не только расширяют кругозор, но и знакомят молодежь с инновациями в традиционных отраслях.
+
+#НаукаПервых #ТехнологииБудущего #ДвижениеПервых59"""
         
         else:
             return """Друзья! "Движение Первых" - это наша общая история, которую мы пишем вместе.
