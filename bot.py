@@ -784,17 +784,17 @@ if __name__ == "__main__":
         app.router.add_get('/', health_handler)
         app.router.add_get('/reset', reset_handler)  # Новый эндпоинт для сброса зависших запросов
         
-        # Получаем порт из переменной окружения
-        # Важно: на Timeweb Cloud порт должен быть 8080
-        port = int(os.environ.get("PORT", 8080))
-        logger.info(f"HTTP сервер будет запущен на порту {port}")
+        # Получаем порт из переменной окружения или используем 8081 по умолчанию
+        # Используем другой порт, чтобы избежать конфликта с simple_server.py
+        PORT = int(os.environ.get("BOT_HTTP_PORT", 8081))
+        logger.info(f"HTTP сервер будет запущен на порту {PORT}")
         
         # Запускаем HTTP сервер в асинхронном режиме без блокировки
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
+        site = web.TCPSite(runner, '0.0.0.0', PORT)
         await site.start()
-        logger.info(f"HTTP сервер запущен на порту {port}")
+        logger.info(f"HTTP сервер запущен на порту {PORT}")
         
         # Запускаем бота
         logger.info("Запуск бота в режиме polling...")
