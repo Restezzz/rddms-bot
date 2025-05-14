@@ -447,112 +447,190 @@ async def cmd_change(message: Message, user_id: int):
 
 @router.message()
 async def process_message(message: Message):
-    """Обработчик текстовых сообщений от пользователя"""
+    """Обрабатывает все текстовые сообщения."""
     user_id = message.from_user.id
-    session = session_manager.get_session(user_id)
     
-    if session.state == UserState.WAITING_FOR_TEMPLATE:
-        # Получен шаблон, теперь ждем тему
-        session_manager.update_session(
-            user_id,
-            template_post=message.text,
-            state=UserState.WAITING_FOR_TOPIC
-        )
-        
+    # Получаем текущую сессию пользователя, если есть
+    user_state = session_manager.get_session(user_id)
+    
+    # Если нет активной сессии, не обрабатываем сообщение
+    if not user_state:
+        logger.info(f"Получено сообщение вне сессии от {user_id}")
+        # Отправляем сообщение о начале новой сессии
         await message.answer(
-            "✅ Шаблон принят! Теперь, пожалуйста, укажите тему для генерации поста."
+            "Чтобы начать работу, нажмите на кнопку или введите команду /start", 
+            reply_markup=main_keyboard
         )
+        return
     
-    elif session.state == UserState.WAITING_FOR_TOPIC:
-        # Получена тема, запрашиваем размер поста
-        session_manager.update_session(
-            user_id,
-            topic=message.text,
-            state=UserState.WAITING_FOR_POST_SIZE
-        )
-        
-        await message.answer(
-            "✅ Тема принята! Теперь выберите предпочтительный размер поста:",
-            reply_markup=size_keyboard
-        )
-    
-    elif session.state == UserState.WAITING_FOR_CHANGES:
-        if session.current_post_message_id and session.chat_id:
-            try:
-                await bot.delete_message(
-                    chat_id=session.chat_id,
-                    message_id=session.current_post_message_id
-                )
-                # Сбрасываем ID сообщения
-                session_manager.update_session(user_id, current_post_message_id=None)
-            except Exception as e:
-                logger.error(f"Не удалось удалить сообщение: {e}")
-        
-        status_message = await message.answer("⏳ Вношу изменения в пост...")
-        
+    # Проверяем текущий этап сессии
+    if user_state.stage == "wait_for_topic":
         try:
-            modified_post = await llm_client.modify_post(
-                session.current_post,
-                message.text,
-                language=session.language
-            )
+            topic = message.text.strip()
             
-            # Обновляем текущий пост
-            session_manager.update_session(
-                user_id,
-                current_post=modified_post,
-                state=UserState.IDLE
-            )
-            
-            # Сообщаем об успешном изменении и показываем результат
-            await status_message.edit_text("✅ Пост успешно изменен!")
-            
-            # Устанавливаем флаг, что сообщение ещё не отправлялось
-            POST_ALREADY_SENT[user_id] = False
-            
-            try:
-                html_text = format_to_html(modified_post)
-                sent_message = await message.answer(html_text, parse_mode="HTML")
-                # Запоминаем ID сообщения с постом
-                session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
-                # Помечаем что сообщение отправлено
-                POST_ALREADY_SENT[user_id] = True
-            except Exception as e:
-                logger.error(f"Ошибка при отправке сообщения с HTML: {e}")
-                # Только если HTML отправка не удалась, пробуем обычный текст
-                if not POST_ALREADY_SENT.get(user_id, False):
-                    sent_message = await message.answer(modified_post)
-                    # Запоминаем ID сообщения с постом
-                    session_manager.update_session(user_id, current_post_message_id=sent_message.message_id)
-            
-            # Создаем инлайн-кнопки для дальнейших действий
-            actions_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✏️ Изменить еще раз", callback_data="action:edit")],
-                [InlineKeyboardButton(text="🚀 Создать новый пост", callback_data="action:new")]
+            # Создаем клавиатуру для действий с постом
+            post_actions = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Подтвердить ✅", callback_data="action:confirm")],
+                [InlineKeyboardButton(text="Изменить ✏️", callback_data="action:edit")],
+                [InlineKeyboardButton(text="Новый пост 🔄", callback_data="action:new")]
             ])
             
-            await message.answer(
-                "Что делаем дальше?",
-                reply_markup=actions_keyboard
-            )
+            # Отправляем сообщение о генерации
+            processing_msg = await message.answer("⏳ Генерирую пост по вашей теме... Это может занять до 30 секунд.")
+            
+            # Определяем, какой режим генерации использовать
+            try:
+                if user_state.post_text and user_state.mode == GenerationMode.TEMPLATE:
+                    # Используем текущий пост как шаблон для нового
+                    logger.info(f"Генерация поста по шаблону для пользователя {user_id}")
+                    
+                    # Устанавливаем таймаут для запроса
+                    try:
+                        post_text = await asyncio.wait_for(
+                            llm_client.generate_from_template(
+                                template_post=user_state.post_text, 
+                                topic=topic,
+                                post_size=user_state.post_size
+                            ),
+                            timeout=45  # 45 секунд на всю генерацию
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"Таймаут при генерации поста по шаблону для {user_id}")
+                        await processing_msg.delete()
+                        await message.answer("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз или выберите другую тему.")
+                        return
+                else:
+                    # Генерируем без шаблона
+                    logger.info(f"Генерация поста без шаблона для пользователя {user_id}")
+                    
+                    # Устанавливаем таймаут для запроса
+                    try:
+                        post_text = await asyncio.wait_for(
+                            llm_client.generate_without_template(
+                                topic=topic,
+                                post_size=user_state.post_size
+                            ),
+                            timeout=45  # 45 секунд на всю генерацию
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(f"Таймаут при генерации поста без шаблона для {user_id}")
+                        await processing_msg.delete()
+                        await message.answer("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз или выберите другую тему.")
+                        return
+                
+                # Сохраняем сгенерированный пост в состоянии пользователя
+                user_state.post_text = post_text
+                user_state.last_topic = topic
+                session_manager.update_session(user_id, user_state)
+                
+                # Удаляем сообщение о генерации
+                await processing_msg.delete()
+                
+                # Отправляем сгенерированный пост
+                await message.answer(
+                    f"✅ Вот ваш пост на тему: {topic}\n\n{post_text}", 
+                    reply_markup=post_actions,
+                    parse_mode='HTML'
+                )
+                logger.info(f"Пост успешно сгенерирован для пользователя {user_id}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка при генерации поста: {e}")
+                await processing_msg.delete()
+                await message.answer(
+                    f"❌ Произошла ошибка при генерации поста: {str(e)}. Пожалуйста, попробуйте еще раз.",
+                    reply_markup=main_keyboard
+                )
+                # Сбрасываем сессию при ошибке
+                session_manager.reset_session(user_id)
+                
         except Exception as e:
-            logger.error(f"Ошибка при изменении поста: {e}")
-            await status_message.edit_text(
-                "❌ Произошла ошибка при внесении изменений. Возможно, сервер нейросети перегружен. "
-                "Пожалуйста, попробуйте еще раз с более кратким описанием изменений."
+            logger.error(f"Ошибка при обработке темы: {e}")
+            await message.answer(
+                "❌ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.",
+                reply_markup=main_keyboard
             )
+            session_manager.reset_session(user_id)
+            
+    elif user_state.stage == "wait_for_edit":
+        try:
+            edit_request = message.text.strip()
+            
+            # Создаем клавиатуру для действий с отредактированным постом
+            post_actions = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Подтвердить ✅", callback_data="action:confirm")],
+                [InlineKeyboardButton(text="Изменить ✏️", callback_data="action:edit")],
+                [InlineKeyboardButton(text="Новый пост 🔄", callback_data="action:new")]
+            ])
+            
+            # Отправляем сообщение о редактировании
+            processing_msg = await message.answer("⏳ Редактирую пост согласно вашим пожеланиям... Это может занять до 30 секунд.")
+            
+            try:
+                # Вызываем редактирование с таймаутом
+                try:
+                    edited_text = await asyncio.wait_for(
+                        llm_client.modify_post(
+                            current_post=user_state.post_text,
+                            modification_request=edit_request
+                        ),
+                        timeout=45  # 45 секунд на всё редактирование
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"Таймаут при редактировании поста для {user_id}")
+                    await processing_msg.delete()
+                    await message.answer("⌛ Время ожидания истекло. Пожалуйста, попробуйте еще раз с более простым запросом.")
+                    return
+                    
+                # Сохраняем отредактированный пост
+                user_state.post_text = edited_text
+                session_manager.update_session(user_id, user_state)
+                
+                # Удаляем сообщение о редактировании
+                await processing_msg.delete()
+                
+                # Отправляем отредактированный пост
+                await message.answer(
+                    f"✅ Вот ваш отредактированный пост:\n\n{edited_text}", 
+                    reply_markup=post_actions,
+                    parse_mode='HTML'
+                )
+                logger.info(f"Пост успешно отредактирован для пользователя {user_id}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка при редактировании поста: {e}")
+                await processing_msg.delete()
+                await message.answer(
+                    f"❌ Произошла ошибка при редактировании поста: {str(e)}. Пожалуйста, попробуйте еще раз.",
+                    reply_markup=post_actions
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при обработке запроса на редактирование: {e}")
+            await message.answer(
+                "❌ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.",
+                reply_markup=main_keyboard
+            )
+    else:
+        # Если не ожидаем ни темы, ни редактирования, то просто игнорируем сообщение
+        logger.info(f"Получено неожиданное сообщение от {user_id} в состоянии {user_state.stage}")
+        await message.answer(
+            "Пожалуйста, выберите действие из меню ниже:",
+            reply_markup=main_keyboard
+        )
 
-# Глобальные переменные для webhook режима - не используются в режиме polling
-# webhook_path = None
-# app = None
-
-async def test_api_connection():
-    """Проверяет подключение к API при запуске"""
+# Функция для отмены всех активных запросов при перезапуске
+async def cancel_active_requests():
     try:
-        logger.info("Диагностика API подключения...")
-        
-        # Используем asyncio.wait_for для ограничения времени ожидания
-        import asyncio
+        logger.info("Отмена всех активных запросов API перед перезапуском")
+        await llm_client.cancel_all_requests()
+    except Exception as e:
+        logger.error(f"Ошибка при отмене запросов: {e}")
+
+# Функция проверки работоспособности API
+async def test_api_connection():
+    """Проверяет доступность API методом отправки тестового запроса."""
+    logger.info("Проверка подключения к API...")
+    try:
         try:
             # Простой запрос для проверки соединения с таймаутом 10 секунд
             await asyncio.wait_for(
@@ -677,18 +755,34 @@ if __name__ == "__main__":
         bot_started_at = time.time()
         polling_active = True
         
+        # Обработчик для принудительного завершения или перезапуска зависших запросов
+        async def reset_handler(request):
+            # Отменяем все активные запросы
+            await cancel_active_requests()
+            session_manager.reset_all_sessions()
+            return web.json_response({
+                "status": "ok", 
+                "message": "Все активные запросы отменены, сессии сброшены"
+            })
+        
         async def health_handler(request):
             uptime = int(time.time() - bot_started_at)
+            # Отслеживаем количество активных запросов
+            active_requests = len(llm_client.active_requests) if hasattr(llm_client, 'active_requests') else 0
+            
             return web.json_response({
                 "status": "ok", 
                 "mode": "polling", 
                 "timestamp": int(time.time()),
                 "uptime": uptime,
                 "polling_active": polling_active,
-                "handlers_count": len(dp.message.handlers)
+                "handlers_count": len(dp.message.handlers),
+                "active_sessions": len(session_manager.sessions),
+                "active_requests": active_requests
             })
         
         app.router.add_get('/', health_handler)
+        app.router.add_get('/reset', reset_handler)  # Новый эндпоинт для сброса зависших запросов
         
         # Получаем порт из переменной окружения
         # Важно: на Timeweb Cloud порт должен быть 8080
@@ -738,6 +832,23 @@ if __name__ == "__main__":
                                     logger.info(f"Результат принудительного удаления webhook: {response_json}")
                     
                     logger.info("Запуск polling...")
+                    # Мониторинг активных запросов каждые 5 минут
+                    async def monitor_active_requests():
+                        while True:
+                            try:
+                                await asyncio.sleep(300)  # Проверка каждые 5 минут
+                                active_requests = len(llm_client.active_requests) if hasattr(llm_client, 'active_requests') else 0
+                                logger.info(f"Мониторинг: {active_requests} активных API запросов")
+                                if active_requests > 10:
+                                    logger.warning(f"Большое количество активных запросов: {active_requests}. Отмена...")
+                                    await cancel_active_requests()
+                            except Exception as e:
+                                logger.error(f"Ошибка в мониторинге активных запросов: {e}")
+                    
+                    # Запускаем мониторинг в отдельной задаче
+                    asyncio.create_task(monitor_active_requests())
+                    
+                    # Запускаем polling
                     await dp.start_polling(bot)
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     logger.error(f"Сетевая ошибка при polling: {e}, перезапуск через 5 секунд...")
