@@ -275,7 +275,7 @@ async def process_mode_selection(callback_query: CallbackQuery):
         session_manager.update_session(
             user_id, 
             mode=mode,
-            state=UserState.WAITING_FOR_TEMPLATE
+            stage="wait_for_template"
         )
         
         # Редактируем сообщение вместо отправки нового
@@ -287,7 +287,7 @@ async def process_mode_selection(callback_query: CallbackQuery):
         session_manager.update_session(
             user_id, 
             mode=mode,
-            state=UserState.WAITING_FOR_TOPIC
+            stage="wait_for_topic"
         )
         
         # Редактируем сообщение вместо отправки нового
@@ -320,7 +320,7 @@ async def process_size_selection(callback_query: CallbackQuery):
     session_manager.update_session(
         user_id,
         post_size=post_size,
-        state=UserState.IDLE
+        stage="idle"  # Используем строковое значение
     )
     
     # Важно: отвечаем на callback сразу, до начала генерации
@@ -420,7 +420,7 @@ async def cmd_change(message: Message, user_id: int):
         )
         return
     
-    session_manager.update_session(user_id, state=UserState.WAITING_FOR_CHANGES)
+    session_manager.update_session(user_id, stage="wait_for_changes")
     
     session_manager.update_session(user_id, chat_id=message.chat.id)
     
