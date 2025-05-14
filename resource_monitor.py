@@ -33,8 +33,8 @@ class ResourceMonitor:
     def __init__(self, 
                  admin_chat_id=None, 
                  check_interval=60, 
-                 cpu_threshold=80, 
-                 memory_threshold=80,
+                 cpu_threshold=90, 
+                 memory_threshold=90,
                  history_size=100):
         """
         Инициализация монитора ресурсов
