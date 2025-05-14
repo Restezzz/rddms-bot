@@ -43,7 +43,7 @@ class UserState:
 
 class UserSession(BaseModel):
     user_id: int
-    state: UserState = UserState.WAITING_FOR_MODE
+    state: Optional[dict] = None  # Заменяем на dict для хранения сериализованного состояния
     mode: Optional[GenerationMode] = None
     template_post: Optional[str] = None
     topic: Optional[str] = None
