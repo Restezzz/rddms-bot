@@ -2,7 +2,7 @@
 app:
   name: rddm-bot
   port: 8080
-  run_command: python delete_webhook.py && python bot.py
+  run_command: python run.py
   check_path: /
   check_timeout: 60
   env:
